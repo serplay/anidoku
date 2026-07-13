@@ -1,0 +1,24 @@
+[package]
+name = "anidoku-core"
+version = "0.1.0"
+edition = "2021"
+description = "AniDoku shared core: provider engine, database, models"
+license = "GPL-3.0-only"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+rusqlite = { version = "0.32", features = ["bundled"] }
+async-trait = "0.1"
+aes = "0.8"
+ctr = "0.9"
+sha2 = "0.10"
+base64 = "0.22"
+hex = "0.4"
+urlencoding = "2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "test-util"] }

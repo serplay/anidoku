@@ -1,0 +1,224 @@
+//! allanime provider: a native port of ani-cli 4.14.1's scraping flow.
+//!
+//! Flow (matching ani-cli):
+//!   search  -> POST GraphQL, parse shows.edges
+//!   episodes-> POST GraphQL, parse availableEpisodesDetail
+//!   sources -> GET persisted GraphQL (POST fallback) for sourceUrls, which
+//!              may be wrapped in an encrypted `tobeparsed` blob; deobfuscate
+//!              each sourceUrl into a /clock.json path, fetch it with the
+//!              allanime referer, parse the links.
+
+mod constants;
+mod decrypt;
+mod parse;
+
+use crate::models::{AnimeSummary, TranslationType, VideoSource};
+use crate::provider::Provider;
+use crate::{Error, Result};
+use async_trait::async_trait;
+use reqwest::Client;
+use serde_json::{json, Value};
+
+pub use constants::*;
+
+pub struct AllAnime {
+    client: Client,
+    key: [u8; 32],
+}
+
+impl Default for AllAnime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AllAnime {
+    pub fn new() -> Self {
+        let client = Client::builder()
+            .user_agent(USER_AGENT)
+            .build()
+            .expect("reqwest client");
+        Self {
+            client,
+            key: decrypt::derive_key(DECRYPT_PASSPHRASE),
+        }
+    }
+
+    async fn post_gql(&self, variables: Value, query: &str) -> Result<String> {
+        let body = json!({ "variables": variables, "query": query });
+        let resp = self
+            .client
+            .post(API_URL)
+            .header("Referer", REFERER)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.text().await?)
+    }
+
+    /// Fetch a deobfuscated `/clock.json?...` embed path against BASE_HOST.
+    async fn fetch_clock(&self, path: &str) -> Result<String> {
+        let url = format!("https://{BASE_HOST}{path}");
+        let resp = self
+            .client
+            .get(&url)
+            .header("Referer", REFERER)
+            .header("Origin", REFERER)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.text().await?)
+    }
+
+    /// The sources GraphQL response may inline the sourceUrls JSON or wrap it
+    /// in an encrypted `tobeparsed` blob. Return the plaintext JSON either way.
+    fn unwrap_sources_response(&self, body: &str) -> Result<String> {
+        let v: Value = serde_json::from_str(body)
+            .map_err(|e| Error::Provider(format!("sources: invalid json envelope: {e}")))?;
+        if let Some(tbp) = find_tobeparsed(&v) {
+            decrypt::decrypt_tobeparsed(tbp, &self.key)
+        } else {
+            Ok(body.to_string())
+        }
+    }
+}
+
+/// Recursively search for a `tobeparsed` string field anywhere in the value.
+fn find_tobeparsed(v: &Value) -> Option<&str> {
+    match v {
+        Value::Object(map) => {
+            if let Some(Value::String(s)) = map.get("tobeparsed") {
+                return Some(s);
+            }
+            map.values().find_map(find_tobeparsed)
+        }
+        Value::Array(arr) => arr.iter().find_map(find_tobeparsed),
+        _ => None,
+    }
+}
+
+#[async_trait]
+impl Provider for AllAnime {
+    fn name(&self) -> &'static str {
+        "allanime"
+    }
+
+    async fn search(&self, query: &str, mode: TranslationType) -> Result<Vec<AnimeSummary>> {
+        let variables = json!({
+            "search": { "allowAdult": false, "allowUnknown": false, "query": query },
+            "limit": 40,
+            "page": 1,
+            "translationType": mode.as_str(),
+            "countryOrigin": "ALL"
+        });
+        let body = self.post_gql(variables, SEARCH_GQL).await?;
+        parse::parse_search(&body)
+    }
+
+    async fn episodes(&self, show_id: &str, mode: TranslationType) -> Result<Vec<String>> {
+        let variables = json!({ "showId": show_id });
+        let body = self.post_gql(variables, EPISODES_LIST_GQL).await?;
+        parse::parse_episodes(&body, mode.as_str())
+    }
+
+    async fn sources(
+        &self,
+        show_id: &str,
+        episode: &str,
+        mode: TranslationType,
+    ) -> Result<Vec<VideoSource>> {
+        let variables = json!({
+            "showId": show_id,
+            "translationType": mode.as_str(),
+            "episodeString": episode
+        });
+        let body = self.post_gql(variables, EPISODE_EMBED_GQL).await?;
+        let json = self.unwrap_sources_response(&body)?;
+        let refs = parse::parse_source_refs(&json)?;
+
+        // Resolve each embed reference into concrete links, skipping refs
+        // that fail rather than aborting the whole set.
+        let mut tasks = Vec::new();
+        for r in refs {
+            tasks.push(self.resolve_ref(r));
+        }
+        let mut sources = Vec::new();
+        for res in futures_join(tasks).await {
+            if let Ok(mut links) = res {
+                sources.append(&mut links);
+            }
+        }
+
+        // Best quality first: numeric resolutions descending, then the rest.
+        sources.sort_by(|a, b| {
+            let qa: i64 = a.quality.parse().unwrap_or(-1);
+            let qb: i64 = b.quality.parse().unwrap_or(-1);
+            qb.cmp(&qa)
+        });
+        Ok(sources)
+    }
+}
+
+impl AllAnime {
+    async fn resolve_ref(&self, r: parse::SourceRef) -> Result<Vec<VideoSource>> {
+        // Direct-download hosts (ani-cli's fast4speed/Yt case) are already
+        // playable and need no clock indirection.
+        if r.url.starts_with("http://") || r.url.starts_with("https://") {
+            let kind = if r.url.contains(".m3u8") {
+                crate::models::StreamKind::Hls
+            } else {
+                crate::models::StreamKind::Mp4
+            };
+            return Ok(vec![VideoSource {
+                provider_name: r.name,
+                quality: "auto".into(),
+                url: r.url,
+                kind,
+                referer: Some(REFERER.to_string()),
+                subtitles: Vec::new(),
+            }]);
+        }
+
+        let path = decrypt::deobfuscate_source_url(&r.url)?;
+        if !path.starts_with('/') {
+            return Ok(Vec::new());
+        }
+        let clock_body = self.fetch_clock(&path).await?;
+        Ok(parse::parse_clock_links(&clock_body, &r.name, Some(REFERER)))
+    }
+}
+
+/// Minimal join over a Vec of futures without pulling in the `futures` crate.
+async fn futures_join<F, T>(tasks: Vec<F>) -> Vec<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    let mut out = Vec::with_capacity(tasks.len());
+    for t in tasks {
+        out.push(t.await);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn find_tobeparsed_nested() {
+        let v: Value = serde_json::from_str(
+            r#"{"data":{"episode":{"tobeparsed":"AAAA","other":1}}}"#,
+        )
+        .unwrap();
+        assert_eq!(find_tobeparsed(&v), Some("AAAA"));
+    }
+
+    #[test]
+    fn unwrap_sources_passes_through_plain() {
+        let a = AllAnime::new();
+        let plain = r#"{"data":{"episode":{"sourceUrls":[]}}}"#;
+        assert_eq!(a.unwrap_sources_response(plain).unwrap(), plain);
+    }
+}
