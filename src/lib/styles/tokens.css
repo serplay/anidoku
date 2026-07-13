@@ -1,0 +1,116 @@
+/*
+ * AniDoku design tokens — translated from DESIGN.md (Binance-derived system).
+ * Dark-first. Inter substitutes for BinanceNova; IBM Plex Sans for BinancePlex
+ * (numbers), per DESIGN.md "Note on Font Substitutes".
+ */
+
+:root {
+	/* Brand & accent */
+	--color-primary: #fcd535;
+	--color-primary-active: #f0b90b;
+	--color-primary-disabled: #3a3a1f;
+	--color-on-primary: #181a20;
+
+	/* Canvas & surfaces (dark, the app default) */
+	--color-canvas: #0b0e11;
+	--color-surface-card: #1e2329;
+	--color-surface-elevated: #2b3139;
+
+	/* Text */
+	--color-ink: #181a20;
+	--color-body: #eaecef;
+	--color-on-dark: #ffffff;
+	--color-muted: #707a8a;
+	--color-muted-strong: #929aa5;
+
+	/* Hairlines & borders */
+	--color-hairline: #2b3139;
+	--color-hairline-light: #eaecef;
+	--color-border-strong: #cdd1d6;
+
+	/* Light transactional surfaces */
+	--color-canvas-light: #ffffff;
+	--color-surface-soft-light: #fafafa;
+	--color-surface-strong-light: #f5f5f5;
+
+	/* Semantic / trading */
+	--color-up: #0ecb81;
+	--color-down: #f6465d;
+	--color-info: #3b82f6;
+
+	/* Type families */
+	--font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+	--font-num: 'IBM Plex Sans', var(--font-sans);
+
+	/* Type scale (size / weight / line-height) */
+	--text-display-lg: 700 48px/1.1 var(--font-sans);
+	--text-display-md: 600 40px/1.15 var(--font-sans);
+	--text-display-sm: 600 32px/1.2 var(--font-sans);
+	--text-title-lg: 600 24px/1.3 var(--font-sans);
+	--text-title-md: 600 20px/1.35 var(--font-sans);
+	--text-title-sm: 600 16px/1.4 var(--font-sans);
+	--text-body-md: 400 14px/1.5 var(--font-sans);
+	--text-body-sm: 400 13px/1.5 var(--font-sans);
+	--text-caption: 500 12px/1.4 var(--font-sans);
+	--text-button: 600 14px/1 var(--font-sans);
+	--text-nav: 500 14px/1.4 var(--font-sans);
+	--text-num-md: 500 16px/1.4 var(--font-num);
+	--text-num-sm: 500 14px/1.4 var(--font-num);
+
+	/* Radius */
+	--radius-xs: 2px;
+	--radius-sm: 4px;
+	--radius-md: 6px;
+	--radius-lg: 8px;
+	--radius-xl: 12px;
+	--radius-pill: 9999px;
+
+	/* Spacing (4px base) */
+	--space-xxs: 4px;
+	--space-xs: 8px;
+	--space-sm: 12px;
+	--space-md: 16px;
+	--space-lg: 24px;
+	--space-xl: 32px;
+	--space-xxl: 48px;
+	--space-section: 80px;
+
+	/* Focus ring */
+	--focus-ring: 0 0 0 2px rgba(59, 130, 246, 0.5);
+}
+
+*,
+*::before,
+*::after {
+	box-sizing: border-box;
+}
+
+html,
+body {
+	margin: 0;
+	padding: 0;
+	height: 100%;
+}
+
+body {
+	background: var(--color-canvas);
+	color: var(--color-body);
+	font: var(--text-body-md);
+	-webkit-font-smoothing: antialiased;
+	text-rendering: optimizeLegibility;
+}
+
+::selection {
+	background: var(--color-primary);
+	color: var(--color-on-primary);
+}
+
+a {
+	color: var(--color-primary);
+	text-decoration: none;
+}
+
+:focus-visible {
+	outline: none;
+	box-shadow: var(--focus-ring);
+}

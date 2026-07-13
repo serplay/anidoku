@@ -88,10 +88,13 @@ pub struct SourceRef {
 pub fn parse_source_refs(decrypted_json: &str) -> Result<Vec<SourceRef>> {
     let v: Value = serde_json::from_str(decrypted_json)
         .map_err(|e| Error::Provider(format!("sources: invalid json: {e}")))?;
+    // The persisted-query payload decrypts to `{"episode":{"sourceUrls":..}}`;
+    // the POST fallback nests it under `data`. Accept either shape.
     let arr = v
         .pointer("/data/episode/sourceUrls")
+        .or_else(|| v.pointer("/episode/sourceUrls"))
         .and_then(Value::as_array)
-        .ok_or_else(|| Error::Provider("sources: missing data.episode.sourceUrls".into()))?;
+        .ok_or_else(|| Error::Provider("sources: missing episode.sourceUrls".into()))?;
 
     let mut out = Vec::new();
     for s in arr {

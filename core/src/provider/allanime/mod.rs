@@ -44,6 +44,33 @@ impl AllAnime {
         }
     }
 
+    /// GET the persisted episode-sources query. This is ani-cli's primary
+    /// path; the server rejects the equivalent ad-hoc POST for many shows.
+    async fn get_episode_persisted(
+        &self,
+        show_id: &str,
+        episode: &str,
+        mode: TranslationType,
+    ) -> Result<String> {
+        let variables = format!(
+            r#"{{"showId":"{show_id}","translationType":"{}","episodeString":"{episode}"}}"#,
+            mode.as_str()
+        );
+        let extensions = format!(
+            r#"{{"persistedQuery":{{"version":1,"sha256Hash":"{EPISODE_QUERY_HASH}"}}}}"#
+        );
+        let resp = self
+            .client
+            .get(API_URL)
+            .header("Referer", REFERER)
+            .header("Origin", REFERER)
+            .query(&[("variables", variables.as_str()), ("extensions", &extensions)])
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(resp.text().await?)
+    }
+
     async fn post_gql(&self, variables: Value, query: &str) -> Result<String> {
         let body = json!({ "variables": variables, "query": query });
         let resp = self
@@ -129,14 +156,25 @@ impl Provider for AllAnime {
         episode: &str,
         mode: TranslationType,
     ) -> Result<Vec<VideoSource>> {
-        let variables = json!({
-            "showId": show_id,
-            "translationType": mode.as_str(),
-            "episodeString": episode
-        });
-        let body = self.post_gql(variables, EPISODE_EMBED_GQL).await?;
-        let json = self.unwrap_sources_response(&body)?;
-        let refs = parse::parse_source_refs(&json)?;
+        // Primary: persisted GET (returns an encrypted `tobeparsed` blob).
+        // Fallback: ad-hoc POST, matching ani-cli's two-step approach.
+        let body = self.get_episode_persisted(show_id, episode, mode).await?;
+        let refs = match self
+            .unwrap_sources_response(&body)
+            .and_then(|j| parse::parse_source_refs(&j))
+        {
+            Ok(refs) if !refs.is_empty() => refs,
+            _ => {
+                let variables = json!({
+                    "showId": show_id,
+                    "translationType": mode.as_str(),
+                    "episodeString": episode
+                });
+                let body = self.post_gql(variables, EPISODE_EMBED_GQL).await?;
+                let json = self.unwrap_sources_response(&body)?;
+                parse::parse_source_refs(&json)?
+            }
+        };
 
         // Resolve each embed reference into concrete links, skipping refs
         // that fail rather than aborting the whole set.

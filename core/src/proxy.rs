@@ -58,7 +58,7 @@ impl ProxyClient {
             .to_string();
         let bytes = resp.bytes().await?.to_vec();
         Ok(FetchedResource {
-            bytes: bytes,
+            bytes,
             content_type,
         })
     }
