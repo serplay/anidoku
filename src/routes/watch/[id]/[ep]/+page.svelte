@@ -164,22 +164,38 @@
 	// so fall back to Tauri window fullscreen + a "theater" overlay that fills it.
 	let playerEl = $state<HTMLDivElement>();
 	let theater = $state(false);
+	// Window fullscreen state before we entered theater, so exiting restores
+	// windowed mode (or keeps fullscreen if the user already had it).
+	let wasWindowFullscreen = false;
 
 	async function toggleFullscreen() {
 		if (document.fullscreenElement) {
 			await document.exitFullscreen();
 			return;
 		}
+		const win = getCurrentWindow();
 		if (theater) {
 			theater = false;
-			await getCurrentWindow().setFullscreen(false);
+			try {
+				await win.setFullscreen(wasWindowFullscreen);
+			} catch {
+				/* capability missing — overlay off is still correct */
+			}
 			return;
 		}
+		if (!playerEl) return;
 		try {
-			await playerEl?.requestFullscreen();
+			await playerEl.requestFullscreen();
 		} catch {
+			// Element fullscreen unavailable (WKWebView): take the whole
+			// screen via window fullscreen + the theater overlay.
+			try {
+				wasWindowFullscreen = await win.isFullscreen();
+				await win.setFullscreen(true);
+			} catch {
+				wasWindowFullscreen = false;
+			}
 			theater = true;
-			await getCurrentWindow().setFullscreen(true);
 		}
 	}
 
