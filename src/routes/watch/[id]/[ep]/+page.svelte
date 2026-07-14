@@ -14,6 +14,7 @@
 	} from '$lib/api';
 	import { recallAnime } from '$lib/state.svelte';
 	import Button from '$lib/components/Button.svelte';
+	import { getCurrentWindow } from '@tauri-apps/api/window';
 
 	const id = $derived(decodeURIComponent(page.params.id ?? ''));
 	const ep = $derived(decodeURIComponent(page.params.ep ?? ''));
@@ -146,6 +147,54 @@
 		if (video) void setWatchState(id, ep, video.currentTime, isFinite(video.duration) ? video.duration : null);
 	}
 
+	// Fullscreen: WKWebView often disables element fullscreen (no native button),
+	// so fall back to Tauri window fullscreen + a "theater" overlay that fills it.
+	let playerEl = $state<HTMLDivElement>();
+	let theater = $state(false);
+
+	async function toggleFullscreen() {
+		if (document.fullscreenElement) {
+			await document.exitFullscreen();
+			return;
+		}
+		if (theater) {
+			theater = false;
+			await getCurrentWindow().setFullscreen(false);
+			return;
+		}
+		try {
+			await playerEl?.requestFullscreen();
+		} catch {
+			theater = true;
+			await getCurrentWindow().setFullscreen(true);
+		}
+	}
+
+	function seekBy(delta: number) {
+		if (!video) return;
+		let t = video.currentTime + delta;
+		if (isFinite(video.duration)) t = Math.min(t, video.duration);
+		video.currentTime = Math.max(0, t);
+	}
+
+	function onKeydown(e: KeyboardEvent) {
+		const t = e.target as HTMLElement | null;
+		if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+		if (e.key === 'f' || e.key === 'F') {
+			e.preventDefault();
+			void toggleFullscreen();
+		} else if (e.key === 'ArrowRight') {
+			e.preventDefault();
+			seekBy(5);
+		} else if (e.key === 'ArrowLeft') {
+			e.preventDefault();
+			seekBy(-5);
+		} else if (e.key === 'Escape' && theater) {
+			e.preventDefault();
+			void toggleFullscreen();
+		}
+	}
+
 	// External subtitle file: convert (SRT/VTT) in Rust, attach as a blob track.
 	let extInput = $state<HTMLInputElement>();
 	async function onExternalSub(e: Event) {
@@ -170,6 +219,8 @@
 	}
 </script>
 
+<svelte:window onkeydown={onKeydown} />
+
 <a class="back" href={`/anime/${encodeURIComponent(id)}?dub=${dub ? 1 : 0}`}>← Back to episodes</a>
 
 <h1>{anime?.title_english ?? anime?.title ?? id} · Episode {ep}</h1>
@@ -179,7 +230,7 @@
 {:else if error && !selected}
 	<p class="error">{error}</p>
 {:else}
-	<div class="player">
+	<div class="player" class:theater bind:this={playerEl}>
 		<!-- svelte-ignore a11y_media_has_caption -->
 		<video
 			bind:this={video}
@@ -235,6 +286,12 @@
 				onchange={onExternalSub}
 			/>
 			<Button variant="secondary" onclick={() => extInput?.click()}>Load subtitle file…</Button>
+		</div>
+
+		<div class="group">
+			<span class="label">Player</span>
+			<Button variant="secondary" onclick={() => void toggleFullscreen()}>⛶ Fullscreen</Button>
+			<span class="hint">F fullscreen · ← / → skip 5s</span>
 		</div>
 	</div>
 {/if}
@@ -302,6 +359,17 @@
 		color: var(--color-primary);
 	}
 	.chip .prov {
+		font: var(--text-caption);
+		color: var(--color-muted);
+	}
+	.player.theater {
+		position: fixed;
+		inset: 0;
+		z-index: 100;
+		aspect-ratio: auto;
+		border-radius: 0;
+	}
+	.hint {
 		font: var(--text-caption);
 		color: var(--color-muted);
 	}
