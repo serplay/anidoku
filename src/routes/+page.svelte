@@ -6,6 +6,7 @@
 	import SearchInput from '$lib/components/SearchInput.svelte';
 	import Button from '$lib/components/Button.svelte';
 	import AnimeCard from '$lib/components/AnimeCard.svelte';
+	import Skeleton from '$lib/components/Skeleton.svelte';
 
 	let query = $state(searchState.query);
 	let dub = $state(searchState.dub);
@@ -67,13 +68,23 @@
 	<p class="error">{error}</p>
 {/if}
 
-{#if results.length > 0}
+{#if loading}
+	<div class="grid">
+		{#each Array(12), i (i)}
+			<div class="cardsk">
+				<Skeleton aspect="2 / 3" radius="var(--radius-lg)" />
+				<Skeleton width="85%" height="14px" />
+				<Skeleton width="55%" height="14px" />
+			</div>
+		{/each}
+	</div>
+{:else if results.length > 0}
 	<div class="grid">
 		{#each results as a (a.provider_id)}
 			<AnimeCard anime={a} onselect={open} />
 		{/each}
 	</div>
-{:else if !loading && searchState.query}
+{:else if searchState.query}
 	<p class="empty">No results for “{searchState.query}”.</p>
 {/if}
 
@@ -125,5 +136,10 @@
 		display: grid;
 		grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
 		gap: var(--space-lg);
+	}
+	.cardsk {
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-xs);
 	}
 </style>

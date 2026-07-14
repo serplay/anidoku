@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { AnimeSummary } from '$lib/api';
 	import { streamUrl } from '$lib/api';
+	import coverPlaceholder from '$lib/assets/cover-placeholder.svg';
 
 	interface Props {
 		anime: AnimeSummary;
@@ -19,11 +20,12 @@
 
 <button class="card" onclick={() => onselect?.(anime)}>
 	<div class="cover">
-		{#if cover}
-			<img src={cover} alt={anime.title} loading="lazy" />
-		{:else}
-			<div class="placeholder">{anime.title.slice(0, 1)}</div>
-		{/if}
+		<img
+			src={cover ?? coverPlaceholder}
+			alt={anime.title}
+			loading="lazy"
+			onerror={(e) => ((e.currentTarget as HTMLImageElement).src = coverPlaceholder)}
+		/>
 		<span class="badge">{anime.available_episodes} ep</span>
 	</div>
 	<div class="meta">
@@ -98,14 +100,6 @@
 	}
 	.card:hover .cover img {
 		transform: scale(1.04);
-	}
-	.placeholder {
-		width: 100%;
-		height: 100%;
-		display: grid;
-		place-items: center;
-		font: var(--text-display-md);
-		color: var(--color-muted);
 	}
 	.badge {
 		position: absolute;

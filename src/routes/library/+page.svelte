@@ -12,6 +12,8 @@
 	} from '$lib/api';
 	import { authState, pushToast, rememberAnime } from '$lib/state.svelte';
 	import ListControls from '$lib/components/ListControls.svelte';
+	import Skeleton from '$lib/components/Skeleton.svelte';
+	import coverPlaceholder from '$lib/assets/cover-placeholder.svg';
 
 	let items = $state<LibraryItem[]>([]);
 	let loading = $state(true);
@@ -116,7 +118,17 @@
 </div>
 
 {#if loading}
-	<p class="status">Loading…</p>
+	<div class="list">
+		{#each Array(6), i (i)}
+			<div class="entrysk">
+				<Skeleton width="48px" height="68px" radius="var(--radius-md)" />
+				<div class="entrysk-body">
+					<Skeleton width="45%" height="16px" />
+					<Skeleton width="25%" height="13px" />
+				</div>
+			</div>
+		{/each}
+	</div>
 {:else if error}
 	<p class="error">{error}</p>
 {:else if shown.length === 0}
@@ -126,11 +138,12 @@
 		{#each shown as i (i.anilist_id)}
 			<div class="entry">
 				<button class="cover" onclick={() => open(i)} aria-label={titleOf(i)}>
-					{#if i.cover_url}
-						<img src={i.cover_url} alt="" loading="lazy" />
-					{:else}
-						<div class="ph">{titleOf(i).slice(0, 1)}</div>
-					{/if}
+					<img
+						src={i.cover_url ?? coverPlaceholder}
+						alt=""
+						loading="lazy"
+						onerror={(e) => ((e.currentTarget as HTMLImageElement).src = coverPlaceholder)}
+					/>
 				</button>
 				<div class="body">
 					<button class="title" onclick={() => open(i)}>{titleOf(i)}</button>
@@ -239,14 +252,17 @@
 		object-fit: cover;
 		display: block;
 	}
-	.ph {
-		width: 100%;
-		height: 100%;
-		display: grid;
-		place-items: center;
-		background: var(--color-surface-elevated);
-		color: var(--color-muted);
-		font: var(--text-title-md);
+	.entrysk {
+		display: flex;
+		align-items: center;
+		gap: var(--space-md);
+		padding: var(--space-xs) 0;
+	}
+	.entrysk-body {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-xs);
 	}
 	.body {
 		flex: 1;
@@ -288,8 +304,7 @@
 		color: var(--color-primary);
 	}
 	.hint,
-	.empty,
-	.status {
+	.empty {
 		color: var(--color-muted);
 		font: var(--text-body-md);
 	}

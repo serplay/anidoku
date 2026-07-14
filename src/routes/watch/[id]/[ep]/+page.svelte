@@ -4,6 +4,7 @@
 	import Hls from 'hls.js';
 	import {
 		getSources,
+		getEpisodes,
 		getWatchState,
 		setWatchState,
 		convertSubtitles,
@@ -16,6 +17,7 @@
 	} from '$lib/api';
 	import { recallAnime } from '$lib/state.svelte';
 	import Button from '$lib/components/Button.svelte';
+	import Skeleton from '$lib/components/Skeleton.svelte';
 	import { getCurrentWindow } from '@tauri-apps/api/window';
 
 	const id = $derived(decodeURIComponent(page.params.id ?? ''));
@@ -34,6 +36,14 @@
 	let lastSaved = 0;
 	let resumeTo = 0;
 	let base = $state('');
+	let episodes = $state<string[]>([]);
+	let episodesFor = '';
+	let autoNext = $state(localStorage.getItem('autoNext') !== '0');
+	$effect(() => localStorage.setItem('autoNext', autoNext ? '1' : '0'));
+	const nextEp = $derived.by(() => {
+		const i = episodes.indexOf(ep);
+		return i >= 0 && i + 1 < episodes.length ? episodes[i + 1] : null;
+	});
 	// The media-server URL currently attached, so playback errors can name it.
 	let currentUrl = $state<string | null>(null);
 
@@ -59,6 +69,14 @@
 				anime.available_episodes || null,
 				anime.anilist_id ?? null
 			).catch(() => {});
+		}
+		// Episode list for next-episode navigation; best-effort.
+		if (episodesFor !== showId) {
+			episodesFor = showId;
+			episodes = [];
+			void getEpisodes(showId, isDub)
+				.then((eps) => (episodes = eps))
+				.catch(() => {});
 		}
 		try {
 			const [srcs, ws, mb] = await Promise.all([
@@ -160,6 +178,18 @@
 		if (video) void setWatchState(id, ep, video.currentTime, isFinite(video.duration) ? video.duration : null);
 	}
 
+	function goNext() {
+		if (nextEp) goto(`/watch/${encodeURIComponent(id)}/${encodeURIComponent(nextEp)}?dub=${dub ? 1 : 0}`);
+	}
+
+	function onended() {
+		// Record the episode as fully watched, then advance.
+		if (video && isFinite(video.duration)) {
+			void setWatchState(id, ep, video.duration, video.duration);
+		}
+		if (autoNext) goNext();
+	}
+
 	// Fullscreen: WKWebView often disables element fullscreen (no native button),
 	// so fall back to Tauri window fullscreen + a "theater" overlay that fills it.
 	let playerEl = $state<HTMLDivElement>();
@@ -258,7 +288,12 @@
 <h1>{anime?.title_english ?? anime?.title ?? id} · Episode {ep}</h1>
 
 {#if loading}
-	<p class="status">Resolving sources…</p>
+	<Skeleton aspect="16 / 9" radius="var(--radius-xl)" />
+	<div class="skrow">
+		<Skeleton width="90px" height="34px" />
+		<Skeleton width="90px" height="34px" />
+		<Skeleton width="120px" height="34px" />
+	</div>
 {:else if error && !selected}
 	<p class="error">{error}</p>
 {:else}
@@ -272,6 +307,7 @@
 			onloadedmetadata={onloaded}
 			ontimeupdate={ontimeupdate}
 			onpause={onpause}
+			{onended}
 			onerror={onVideoError}
 		>
 			{#each subtitles as sub (sub.url)}
@@ -322,7 +358,15 @@
 
 		<div class="group">
 			<span class="label">Player</span>
-			<Button variant="secondary" onclick={() => void toggleFullscreen()}>⛶ Fullscreen</Button>
+			<div class="row">
+				<Button variant="secondary" onclick={() => void toggleFullscreen()}>⛶ Fullscreen</Button>
+				{#if nextEp}
+					<Button onclick={goNext}>Next episode ({nextEp}) →</Button>
+				{/if}
+				<label class="autonext">
+					<input type="checkbox" bind:checked={autoNext} /> Auto-next
+				</label>
+			</div>
 			<span class="hint">Space play/pause · F fullscreen · ← / → skip 5s</span>
 		</div>
 	</div>
@@ -405,8 +449,27 @@
 		font: var(--text-caption);
 		color: var(--color-muted);
 	}
-	.status {
-		color: var(--color-muted);
+	.row {
+		display: flex;
+		align-items: center;
+		gap: var(--space-sm);
+	}
+	.autonext {
+		display: flex;
+		align-items: center;
+		gap: var(--space-xxs);
+		font: var(--text-body-md);
+		color: var(--color-muted-strong);
+		cursor: pointer;
+		user-select: none;
+	}
+	.autonext input {
+		accent-color: var(--color-primary);
+	}
+	.skrow {
+		display: flex;
+		gap: var(--space-sm);
+		margin-top: var(--space-lg);
 	}
 	.error {
 		color: var(--color-down);

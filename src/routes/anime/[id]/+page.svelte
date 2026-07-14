@@ -18,6 +18,8 @@
 	import { recallAnime, authState, pushToast } from '$lib/state.svelte';
 	import EpisodeRow from '$lib/components/EpisodeRow.svelte';
 	import VirtualList from '$lib/components/VirtualList.svelte';
+	import Skeleton from '$lib/components/Skeleton.svelte';
+	import coverPlaceholder from '$lib/assets/cover-placeholder.svg';
 	import ListControls from '$lib/components/ListControls.svelte';
 
 	const id = $derived(decodeURIComponent(page.params.id ?? ''));
@@ -146,9 +148,12 @@
 <a class="back" href="/">← Back to search</a>
 
 <section class="hero">
-	{#if cover}
-		<img class="cover" src={cover} alt={anime?.title} />
-	{/if}
+	<img
+		class="cover"
+		src={cover ?? coverPlaceholder}
+		alt={anime?.title}
+		onerror={(e) => ((e.currentTarget as HTMLImageElement).src = coverPlaceholder)}
+	/>
 	<div class="info">
 		<h1>{anime?.title_english ?? anime?.title ?? id}</h1>
 		{#if anime?.title_english && anime.title_english !== anime.title}
@@ -223,7 +228,11 @@
 <h2>Episodes</h2>
 
 {#if loading}
-	<p class="status">Loading episodes…</p>
+	<div class="list">
+		{#each Array(8), i (i)}
+			<Skeleton height="44px" />
+		{/each}
+	</div>
 {:else if error}
 	<p class="error">{error}</p>
 {:else if episodes.length === 0}
