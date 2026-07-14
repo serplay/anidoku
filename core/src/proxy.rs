@@ -37,13 +37,18 @@ impl ProxyClient {
         Self {
             client: Client::builder()
                 .user_agent(USER_AGENT)
+                // Do not let reqwest transparently gzip/decompress: the media
+                // server proxies raw bytes and relays upstream Content-Length /
+                // Content-Range, which transparent decompression would falsify.
+                .no_gzip()
                 .build()
                 .expect("reqwest client"),
         }
     }
 
-    /// Fetch `url` with the given `referer`, returning body bytes and the
-    /// upstream content type (defaulting to octet-stream).
+    /// Fetch `url` fully with the given `referer`, returning body bytes and the
+    /// upstream content type (defaulting to octet-stream). Used for small
+    /// resources we must have in full (HLS playlists to rewrite).
     pub async fn fetch(&self, url: &str, referer: Option<&str>) -> Result<FetchedResource> {
         let mut req = self.client.get(url);
         if let Some(r) = referer {
@@ -61,6 +66,28 @@ impl ProxyClient {
             bytes,
             content_type,
         })
+    }
+
+    /// Issue a GET with the referer injected and the client's `Range` header
+    /// (if any) forwarded verbatim, returning the raw upstream response so the
+    /// caller can relay its status (`200`/`206`), range headers, and stream the
+    /// body. This is the passthrough path for MP4 and HLS segments, where
+    /// preserving `Range` -> `206 Partial Content` is what macOS AVFoundation
+    /// requires to play at all.
+    pub async fn get_ranged(
+        &self,
+        url: &str,
+        referer: Option<&str>,
+        range: Option<&str>,
+    ) -> Result<reqwest::Response> {
+        let mut req = self.client.get(url);
+        if let Some(r) = referer {
+            req = req.header(reqwest::header::REFERER, r).header(reqwest::header::ORIGIN, r);
+        }
+        if let Some(rg) = range {
+            req = req.header(reqwest::header::RANGE, rg);
+        }
+        Ok(req.send().await?)
     }
 }
 
