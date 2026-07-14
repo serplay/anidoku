@@ -112,6 +112,46 @@ impl AllAnime {
     }
 }
 
+/// Best-effort playability ranking for ordering sources (0 = best).
+///
+/// A webview `<video>` can only play a direct media file (MP4/HLS), not an
+/// embed *page*. allanime mixes both kinds into one list; ani-cli sidesteps
+/// this by only handling a known subset. We can't extract embed pages here, so
+/// we at least float the directly-playable sources to the top:
+///   0 — looks like a direct media file / known direct CDN
+///   1 — unknown (could be either)
+///   2 — looks like an HTML embed page (ok.ru, mp4upload, /e/…, …)
+fn playability_rank(s: &crate::models::VideoSource) -> u8 {
+    let url = s.url.to_ascii_lowercase();
+    let path = url.split(['?', '#']).next().unwrap_or(&url);
+
+    let is_media_ext = path.ends_with(".m3u8")
+        || path.ends_with(".mp4")
+        || path.ends_with(".m4v")
+        || path.ends_with(".mkv")
+        || path.ends_with(".webm");
+    let is_direct_cdn = url.contains("fast4speed")
+        || url.contains("wixmp")
+        || (url.contains("sharepoint.com") && url.contains("download.aspx"));
+    if matches!(s.kind, crate::models::StreamKind::Hls) || is_media_ext || is_direct_cdn {
+        return 0;
+    }
+
+    let is_embed_page = path.ends_with(".html")
+        || url.contains("/e/")
+        || url.contains("/embed")
+        || url.contains("videoembed")
+        || url.contains("ok.ru")
+        || url.contains("mp4upload")
+        || url.contains("vidnest")
+        // Fragment-routed single-page embeds (e.g. allanime.uns.bio/#abc123).
+        || url.contains("uns.bio");
+    if is_embed_page {
+        return 2;
+    }
+    1
+}
+
 /// Recursively search for a `tobeparsed` string field anywhere in the value.
 fn find_tobeparsed(v: &Value) -> Option<&str> {
     match v {
@@ -189,11 +229,16 @@ impl Provider for AllAnime {
             }
         }
 
-        // Best quality first: numeric resolutions descending, then the rest.
+        // Order so the default (first) source is one that actually plays in a
+        // webview <video>. Many allanime "sources" are HTML embed pages we
+        // cannot drop straight into a media element; sort those last. Within a
+        // playability tier, prefer higher numeric resolution.
         sources.sort_by(|a, b| {
-            let qa: i64 = a.quality.parse().unwrap_or(-1);
-            let qb: i64 = b.quality.parse().unwrap_or(-1);
-            qb.cmp(&qa)
+            playability_rank(a).cmp(&playability_rank(b)).then_with(|| {
+                let qa: i64 = a.quality.parse().unwrap_or(-1);
+                let qb: i64 = b.quality.parse().unwrap_or(-1);
+                qb.cmp(&qa)
+            })
         });
         Ok(sources)
     }
@@ -251,6 +296,40 @@ mod tests {
         )
         .unwrap();
         assert_eq!(find_tobeparsed(&v), Some("AAAA"));
+    }
+
+    fn src(url: &str, kind: crate::models::StreamKind) -> crate::models::VideoSource {
+        crate::models::VideoSource {
+            provider_name: "t".into(),
+            quality: "auto".into(),
+            url: url.into(),
+            kind,
+            referer: None,
+            subtitles: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn playability_rank_orders_direct_media_before_embeds() {
+        use crate::models::StreamKind::*;
+        // Direct media / known CDNs -> 0
+        assert_eq!(playability_rank(&src("https://cdn/x.mp4", Mp4)), 0);
+        assert_eq!(playability_rank(&src("https://cdn/x.m3u8", Hls)), 0);
+        assert_eq!(
+            playability_rank(&src("https://tools.fast4speed.rsvp/media/1?Authorization=z", Mp4)),
+            0
+        );
+        assert_eq!(
+            playability_rank(&src("https://x.sharepoint.com/_layouts/15/download.aspx?id=1", Mp4)),
+            0
+        );
+        // HTML embed pages -> 2
+        assert_eq!(playability_rank(&src("https://ok.ru/videoembed/123", Mp4)), 2);
+        assert_eq!(playability_rank(&src("https://mp4upload.com/embed-a.html", Mp4)), 2);
+        assert_eq!(playability_rank(&src("https://vidnest.io/e/abc", Mp4)), 2);
+        assert_eq!(playability_rank(&src("https://allanime.uns.bio/#abc", Mp4)), 2);
+        // Unknown -> 1
+        assert_eq!(playability_rank(&src("https://weird.host/thing", Mp4)), 1);
     }
 
     #[test]
