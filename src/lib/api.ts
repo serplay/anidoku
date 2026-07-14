@@ -279,3 +279,155 @@ export function mediaUrl(
 	if (contentType) s += `&ct=${encodeURIComponent(contentType)}`;
 	return s;
 }
+
+// ---------------------------------------------------------------------------
+// Downloads (M3)
+// ---------------------------------------------------------------------------
+
+export type DownloadState = 'queued' | 'downloading' | 'paused' | 'done' | 'failed';
+
+export interface DownloadRow {
+	id: number;
+	anime_id: string;
+	episode_number: string;
+	state: DownloadState;
+	quality: string | null;
+	dub: boolean;
+	kind: StreamKind | null;
+	bytes_total: number | null;
+	bytes_done: number;
+	segments_done: number;
+	segments_total: number | null;
+	dir_path: string | null;
+	error: string | null;
+	created_at: number;
+	updated_at: number;
+	title: string | null;
+}
+
+export interface AnimeStorage {
+	anime_id: string;
+	title: string | null;
+	cover_url: string | null;
+	episodes: number;
+	bytes: number;
+}
+
+export interface DownloadStorage {
+	per_anime: AnimeStorage[];
+	total_bytes: number;
+}
+
+export interface OfflineSubtitle {
+	label: string;
+	lang: string;
+	file: string;
+}
+
+export interface OfflineInfo {
+	dir: string;
+	kind: StreamKind;
+	quality: string;
+	video: string;
+	subtitles: OfflineSubtitle[];
+}
+
+// Event payloads for download:progress / download:state.
+export interface DownloadProgressEvent {
+	id: number;
+	anime_id: string;
+	episode_number: string;
+	bytes_done: number;
+	bytes_total: number | null;
+	segments_done: number;
+	segments_total: number | null;
+	speed_bps: number;
+}
+
+export interface DownloadStateEvent {
+	id: number;
+	anime_id: string;
+	episode_number: string;
+	state: DownloadState;
+	error: string | null;
+	removed: boolean;
+}
+
+export function enqueueDownloads(
+	animeId: string,
+	episodes: string[],
+	quality: string | null,
+	dub: boolean
+): Promise<number> {
+	return invoke('enqueue_downloads', { animeId, episodes, quality, dub });
+}
+
+export function listDownloads(): Promise<DownloadRow[]> {
+	return invoke('list_downloads');
+}
+
+export function downloadsForAnime(animeId: string): Promise<DownloadRow[]> {
+	return invoke('downloads_for_anime', { animeId });
+}
+
+export function pauseDownload(id: number): Promise<void> {
+	return invoke('pause_download', { id });
+}
+
+export function resumeDownload(id: number): Promise<void> {
+	return invoke('resume_download', { id });
+}
+
+// Cancels an active/queued download or deletes a completed/failed one
+// (row + files).
+export function cancelDownload(id: number): Promise<void> {
+	return invoke('cancel_download', { id });
+}
+
+export function deleteAnimeDownloads(animeId: string): Promise<number> {
+	return invoke('delete_anime_downloads', { animeId });
+}
+
+export function deleteCompletedDownloads(): Promise<number> {
+	return invoke('delete_completed_downloads');
+}
+
+export function downloadStorage(): Promise<DownloadStorage> {
+	return invoke('download_storage');
+}
+
+export function getOfflineInfo(animeId: string, episode: string): Promise<OfflineInfo | null> {
+	return invoke('get_offline_info', { animeId, episode });
+}
+
+// URL of a downloaded file served by the media server's /dl route. `dir` is
+// the episode dir relative to the downloads root (already fs-sanitized).
+export function offlineUrl(base: string, dir: string, file: string): string {
+	return `${base}/dl/${dir}/${file}`;
+}
+
+// Human-readable byte size ("1.4 GB").
+export function formatBytes(n: number): string {
+	if (!isFinite(n) || n <= 0) return '0 B';
+	const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+	let i = 0;
+	let v = n;
+	while (v >= 1024 && i < units.length - 1) {
+		v /= 1024;
+		i++;
+	}
+	return `${v >= 100 || i === 0 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+// Fraction complete (0..1) for a download row / progress event.
+export function downloadFraction(d: {
+	bytes_done: number;
+	bytes_total: number | null;
+	segments_done: number;
+	segments_total: number | null;
+}): number {
+	if (d.bytes_total && d.bytes_total > 0) return Math.min(1, d.bytes_done / d.bytes_total);
+	if (d.segments_total && d.segments_total > 0)
+		return Math.min(1, d.segments_done / d.segments_total);
+	return 0;
+}
