@@ -12,7 +12,8 @@
 		anilistSyncNow,
 		onEvent,
 		isDesktop,
-		type RemoteOverwrite
+		type RemoteOverwrite,
+		type DownloadStateEvent
 	} from '$lib/api';
 	import { authState, setAuthStatus, toasts, pushToast } from '$lib/state.svelte';
 
@@ -61,6 +62,18 @@
 				if (unmappedSeen.has(providerId)) return;
 				unmappedSeen.add(providerId);
 				pushToast('Show not linked to AniList — progress kept locally only', 'info');
+			}),
+			// Download completion/failure toasts, wherever the user is.
+			onEvent<DownloadStateEvent>('download:state', (p) => {
+				if (p.removed) return;
+				if (p.state === 'done') {
+					pushToast(`Download complete: Episode ${p.episode_number}`, 'sync');
+				} else if (p.state === 'failed') {
+					pushToast(
+						`Download failed: Episode ${p.episode_number}${p.error ? ` — ${p.error}` : ''}`,
+						'info'
+					);
+				}
 			})
 		];
 		// Drain the queue the moment connectivity returns instead of waiting
@@ -78,6 +91,7 @@
 	const nav = [
 		{ href: '/', label: 'Search' },
 		{ href: '/library', label: 'Library' },
+		{ href: '/downloads', label: 'Downloads' },
 		{ href: '/settings', label: 'Settings' }
 	];
 

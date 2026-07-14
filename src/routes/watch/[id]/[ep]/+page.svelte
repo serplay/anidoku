@@ -12,8 +12,11 @@
 		isDesktop,
 		mediaBase,
 		mediaUrl,
+		getOfflineInfo,
+		offlineUrl,
 		type VideoSource,
-		type SubtitleTrack
+		type SubtitleTrack,
+		type OfflineInfo
 	} from '$lib/api';
 	import { recallAnime } from '$lib/state.svelte';
 	import Button from '$lib/components/Button.svelte';
@@ -28,9 +31,13 @@
 	let video = $state<HTMLVideoElement>();
 	let sources = $state<VideoSource[]>([]);
 	let selected = $state<VideoSource | null>(null);
-	let subtitles = $state<SubtitleTrack[]>([]);
+	let subtitles = $state<{ label: string; lang: string; src: string }[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	// Completed download for this episode, when playing offline.
+	let offline = $state<OfflineInfo | null>(null);
+	// User opted out of the offline copy for this episode ("Stream instead").
+	let forceStream = $state(false);
 
 	let hls: Hls | null = null;
 	let lastSaved = 0;
@@ -83,6 +90,31 @@
 				.catch(() => {});
 		}
 		try {
+			// Prefer a completed download: instant, works offline. Falls back to
+			// streaming when absent (or when the user picked "Stream instead").
+			offline = null;
+			if (isDesktop() && !forceStream) {
+				const [info, ws, mb] = await Promise.all([
+					getOfflineInfo(showId, episode).catch(() => null),
+					getWatchState(showId, episode).catch(() => null),
+					base ? Promise.resolve(base) : mediaBase()
+				]);
+				base = mb;
+				resumeTo = ws?.position_secs ?? 0;
+				if (info) {
+					offline = info;
+					subtitles = info.subtitles.map((t) => ({
+						label: t.label,
+						lang: t.lang,
+						src: offlineUrl(base, info.dir, t.file)
+					}));
+					queueMicrotask(() =>
+						attachMedia(info.kind, offlineUrl(base, info.dir, info.video))
+					);
+					loading = false;
+					return;
+				}
+			}
 			const [srcs, ws, mb] = await Promise.all([
 				getSources(showId, episode, isDub),
 				getWatchState(showId, episode).catch(() => null),
@@ -103,11 +135,23 @@
 		}
 	}
 
+	function streamInstead() {
+		forceStream = true;
+		loading = true;
+		void load(id, ep, dub);
+	}
+
 	function selectSource(s: VideoSource) {
 		selected = s;
-		subtitles = s.subtitles;
+		subtitles = s.subtitles.map((t: SubtitleTrack) => ({
+			label: t.label,
+			lang: t.lang,
+			src: mediaUrl(base, t.url, s.referer)
+		}));
 		// Wait for the <video> to exist, then attach.
-		queueMicrotask(() => attach(s));
+		queueMicrotask(() =>
+			attachMedia(s.kind, mediaUrl(base, s.url, s.referer, s.kind === 'mp4' ? 'video/mp4' : undefined))
+		);
 	}
 
 	function teardown() {
@@ -117,14 +161,12 @@
 		}
 	}
 
-	function attach(s: VideoSource) {
+	function attachMedia(kind: 'hls' | 'mp4', url: string) {
 		if (!video) return;
 		teardown();
-		// For progressive MP4, hint video/mp4 so octet-stream CDNs still play.
-		const url = mediaUrl(base, s.url, s.referer, s.kind === 'mp4' ? 'video/mp4' : undefined);
 		currentUrl = url;
 
-		if (s.kind === 'hls') {
+		if (kind === 'hls') {
 			// WKWebView (macOS/iOS) plays HLS natively; elsewhere use hls.js.
 			if (video.canPlayType('application/vnd.apple.mpegurl')) {
 				video.src = url;
@@ -318,13 +360,8 @@
 			{onended}
 			onerror={onVideoError}
 		>
-			{#each subtitles as sub (sub.url)}
-				<track
-					kind="subtitles"
-					label={sub.label}
-					srclang={sub.lang}
-					src={mediaUrl(base, sub.url, selected?.referer ?? null)}
-				/>
+			{#each subtitles as sub (sub.src)}
+				<track kind="subtitles" label={sub.label} srclang={sub.lang} src={sub.src} />
 			{/each}
 		</video>
 	</div>
@@ -334,7 +371,25 @@
 	{/if}
 
 	<div class="controls">
-		{#if qualities.length > 1}
+		{#if offline}
+			<div class="group offline-note">
+				<span class="badge">
+					<svg viewBox="0 0 24 24" aria-hidden="true">
+						<path
+							d="M5 13l4 4L19 7"
+							stroke="currentColor"
+							stroke-width="2.5"
+							fill="none"
+							stroke-linecap="round"
+							stroke-linejoin="round"
+						/>
+					</svg>
+					Playing offline copy{offline.quality ? ` · ${offline.quality}` : ''}
+				</span>
+				<button class="streamlink" onclick={streamInstead}>Stream instead</button>
+			</div>
+		{/if}
+		{#if !offline && qualities.length > 1}
 			<div class="group">
 				<span class="label">Quality</span>
 				<div class="chips">
@@ -476,6 +531,36 @@
 	}
 	.autonext input {
 		accent-color: var(--color-primary);
+	}
+	.offline-note {
+		flex-direction: row;
+		align-items: center;
+		gap: var(--space-sm);
+	}
+	.badge {
+		display: inline-flex;
+		align-items: center;
+		gap: var(--space-xs);
+		font: var(--text-caption);
+		color: var(--color-up);
+		border: 1px solid var(--color-up);
+		border-radius: var(--radius-pill);
+		padding: 4px 10px;
+	}
+	.badge svg {
+		width: 13px;
+		height: 13px;
+	}
+	.streamlink {
+		background: none;
+		border: none;
+		color: var(--color-muted-strong);
+		font: var(--text-body-sm);
+		text-decoration: underline;
+		cursor: pointer;
+	}
+	.streamlink:hover {
+		color: var(--color-on-dark);
 	}
 	.skrow {
 		display: flex;
