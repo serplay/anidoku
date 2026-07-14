@@ -7,7 +7,8 @@
 		getWatchState,
 		setWatchState,
 		convertSubtitles,
-		streamUrl,
+		mediaBase,
+		mediaUrl,
 		type VideoSource,
 		type SubtitleTrack
 	} from '$lib/api';
@@ -29,6 +30,9 @@
 	let hls: Hls | null = null;
 	let lastSaved = 0;
 	let resumeTo = 0;
+	let base = $state('');
+	// The media-server URL currently attached, so playback errors can name it.
+	let currentUrl = $state<string | null>(null);
 
 	// Distinct qualities for the selector.
 	const qualities = $derived(sources.map((s) => s.quality));
@@ -43,10 +47,12 @@
 		error = null;
 		selected = null;
 		try {
-			const [srcs, ws] = await Promise.all([
+			const [srcs, ws, mb] = await Promise.all([
 				getSources(showId, episode, isDub),
-				getWatchState(showId, episode).catch(() => null)
+				getWatchState(showId, episode).catch(() => null),
+				base ? Promise.resolve(base) : mediaBase()
 			]);
+			base = mb;
 			sources = srcs;
 			resumeTo = ws?.position_secs ?? 0;
 			if (srcs.length === 0) {
@@ -78,7 +84,9 @@
 	function attach(s: VideoSource) {
 		if (!video) return;
 		teardown();
-		const url = streamUrl(s.url, s.referer);
+		// For progressive MP4, hint video/mp4 so octet-stream CDNs still play.
+		const url = mediaUrl(base, s.url, s.referer, s.kind === 'mp4' ? 'video/mp4' : undefined);
+		currentUrl = url;
 
 		if (s.kind === 'hls') {
 			// WKWebView (macOS/iOS) plays HLS natively; elsewhere use hls.js.
@@ -89,7 +97,10 @@
 				hls.loadSource(url);
 				hls.attachMedia(video);
 				hls.on(Hls.Events.ERROR, (_e, data) => {
-					if (data.fatal) error = `Playback error: ${data.details}`;
+					if (data.fatal)
+						error = `HLS error: ${data.type} / ${data.details}` +
+							(data.response ? ` (HTTP ${data.response.code})` : '') +
+							` — source: ${url}`;
 				});
 			} else {
 				error = 'HLS is not supported in this webview.';
@@ -99,6 +110,20 @@
 			video.src = url;
 		}
 		video.load();
+	}
+
+	// Surface the real <video> media error instead of the dead slashed-play icon.
+	const MEDIA_ERR: Record<number, string> = {
+		1: 'MEDIA_ERR_ABORTED — fetch aborted',
+		2: 'MEDIA_ERR_NETWORK — network error while fetching media',
+		3: 'MEDIA_ERR_DECODE — decode error (corrupt or unsupported codec)',
+		4: 'MEDIA_ERR_SRC_NOT_SUPPORTED — source failed to load or is unsupported'
+	};
+	function onVideoError() {
+		const e = video?.error;
+		if (!e) return;
+		const desc = MEDIA_ERR[e.code] ?? `code ${e.code}`;
+		error = `Playback failed [${desc}]${e.message ? `: ${e.message}` : ''} — source: ${currentUrl}`;
 	}
 
 	function onloaded() {
@@ -164,13 +189,14 @@
 			onloadedmetadata={onloaded}
 			ontimeupdate={ontimeupdate}
 			onpause={onpause}
+			onerror={onVideoError}
 		>
 			{#each subtitles as sub (sub.url)}
 				<track
 					kind="subtitles"
 					label={sub.label}
 					srclang={sub.lang}
-					src={streamUrl(sub.url, selected?.referer ?? null)}
+					src={mediaUrl(base, sub.url, selected?.referer ?? null)}
 				/>
 			{/each}
 		</video>

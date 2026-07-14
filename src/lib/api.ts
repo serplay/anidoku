@@ -86,10 +86,33 @@ export function convertSubtitles(content: string, formatHint: string): Promise<s
 	return invoke('convert_subtitles', { content, formatHint });
 }
 
-// Build a `stream://` URL that proxies an upstream media URL with the referer
-// header the webview cannot set itself.
+// Base URL of the loopback media server (e.g. http://127.0.0.1:52123).
+export function mediaBase(): Promise<string> {
+	return invoke('media_base');
+}
+
+// Build a `stream://` URL for referer-gated cover images. The custom scheme is
+// fine for images (fetched normally by the webview); it is NOT used for media,
+// which needs Range/206 support — see `mediaUrl`.
 export function streamUrl(upstream: string, referer: string | null): string {
 	let s = `stream://localhost/?url=${encodeURIComponent(upstream)}`;
 	if (referer) s += `&referer=${encodeURIComponent(referer)}`;
+	return s;
+}
+
+// Build a loopback media-server URL for playback (MP4/HLS/subtitles). Routes
+// through a real HTTP server that injects Referer, rewrites HLS playlists, and
+// passes byte ranges through so macOS AVFoundation gets its 206 responses.
+export function mediaUrl(
+	base: string,
+	upstream: string,
+	referer: string | null,
+	contentType?: string
+): string {
+	let s = `${base}/media?url=${encodeURIComponent(upstream)}`;
+	if (referer) s += `&referer=${encodeURIComponent(referer)}`;
+	// Hint for CDNs that serve MP4 as application/octet-stream (WebKit <video>
+	// needs a video/* type). Ignored by the server when upstream is specific.
+	if (contentType) s += `&ct=${encodeURIComponent(contentType)}`;
 	return s;
 }
