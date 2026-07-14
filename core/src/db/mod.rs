@@ -314,6 +314,26 @@ impl Database {
         }
     }
 
+    /// Record that episode `progress` was watched: ensure the show is listed
+    /// (auto-adding to CURRENT), advance progress monotonically, and promote
+    /// the status to COMPLETED as soon as progress reaches the known episode
+    /// count. Returns the entry and whether anything changed (so the caller
+    /// can enqueue a mutation).
+    pub fn mark_watched(&self, anilist_id: i64, progress: i64) -> Result<(ListEntry, bool)> {
+        let (entry, changed) = self.ensure_current(anilist_id, progress)?;
+        let total = self.media_episode_count(anilist_id)?.unwrap_or(0);
+        if total > 0 && entry.progress >= total && entry.status != MediaListStatus::Completed {
+            let promoted = self.set_list_entry_local(
+                anilist_id,
+                MediaListStatus::Completed,
+                entry.progress,
+                entry.score,
+            )?;
+            return Ok((promoted, true));
+        }
+        Ok((entry, changed))
+    }
+
     /// The library view: every list entry joined with whatever media metadata
     /// and provider mapping we have.
     pub fn library(&self) -> Result<Vec<LibraryItem>> {
@@ -498,6 +518,45 @@ mod tests {
         let (e, changed) = db.ensure_current(100, 4).unwrap();
         assert!(changed);
         assert_eq!(e.progress, 4);
+    }
+
+    #[test]
+    fn mark_watched_promotes_to_completed_on_last_episode() {
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_media(100, Some("Show"), None, None, Some(12), Some("TV")).unwrap();
+        // Mid-season: stays CURRENT.
+        let (e, changed) = db.mark_watched(100, 11).unwrap();
+        assert!(changed);
+        assert_eq!(e.status, MediaListStatus::Current);
+        // Final episode: promoted in the same local write.
+        let (e, changed) = db.mark_watched(100, 12).unwrap();
+        assert!(changed);
+        assert_eq!(e.status, MediaListStatus::Completed);
+        assert_eq!(e.progress, 12);
+        assert!(e.dirty);
+        // Idempotent: re-watching the finale changes nothing.
+        let (_e, changed) = db.mark_watched(100, 12).unwrap();
+        assert!(!changed);
+    }
+
+    #[test]
+    fn mark_watched_promotes_even_when_progress_already_at_count() {
+        let db = Database::open_in_memory().unwrap();
+        // Entry reached the count before the episode total became known.
+        db.set_list_entry_local(100, MediaListStatus::Current, 12, None).unwrap();
+        db.upsert_media(100, Some("Show"), None, None, Some(12), Some("TV")).unwrap();
+        let (e, changed) = db.mark_watched(100, 12).unwrap();
+        assert!(changed);
+        assert_eq!(e.status, MediaListStatus::Completed);
+    }
+
+    #[test]
+    fn mark_watched_without_known_count_stays_current() {
+        let db = Database::open_in_memory().unwrap();
+        let (e, changed) = db.mark_watched(200, 3).unwrap();
+        assert!(changed);
+        assert_eq!(e.status, MediaListStatus::Current);
+        assert_eq!(e.progress, 3);
     }
 
     #[test]

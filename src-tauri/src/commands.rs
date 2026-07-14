@@ -10,7 +10,7 @@ use anidoku_core::provider::Provider;
 use anidoku_core::sync::best_match;
 use serde::Serialize;
 use std::time::Duration;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_opener::OpenerExt;
 
 /// Search results plus the proxied stream-scheme prefix the UI needs.
@@ -91,19 +91,25 @@ pub fn set_watch_state(
 
     // Auto-progress: crossing 85% of an episode marks it watched. If the show
     // is mapped to AniList, bump progress locally (auto-adding to CURRENT when
-    // unlisted) and enqueue a push. All of this is skipped silently when the
-    // show has no AniList mapping — local-only tracking still works.
+    // unlisted, promoting to COMPLETED on the last episode) and enqueue a push.
+    // An unmapped show is surfaced to the UI instead of no-oping silently.
     if let Some(dur) = duration_secs {
         if dur > 0.0 && position_secs / dur >= 0.85 {
-            if let (Some(anilist_id), Some(progress)) = (
+            match (
                 state.db.anilist_id_for_provider(&anime_id).ok().flatten(),
                 episode_to_progress(&episode),
             ) {
-                if let Ok((entry, changed)) = state.db.ensure_current(anilist_id, progress) {
-                    if changed {
-                        crate::sync::push_local(&state, &app, &entry);
+                (Some(anilist_id), Some(progress)) => {
+                    if let Ok((entry, changed)) = state.db.mark_watched(anilist_id, progress) {
+                        if changed {
+                            crate::sync::push_local(&state, &app, &entry);
+                        }
                     }
                 }
+                (None, Some(_)) => {
+                    let _ = app.emit("sync:unmapped", &anime_id);
+                }
+                _ => {}
             }
         }
     }

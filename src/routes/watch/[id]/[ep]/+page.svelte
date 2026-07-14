@@ -7,6 +7,8 @@
 		getWatchState,
 		setWatchState,
 		convertSubtitles,
+		getAnimeListState,
+		isDesktop,
 		mediaBase,
 		mediaUrl,
 		type VideoSource,
@@ -47,6 +49,17 @@
 		loading = true;
 		error = null;
 		selected = null;
+		// Ensure the AniList mapping exists before auto-progress needs it —
+		// the detail page resolves it too, but a deep link / restart may not
+		// have passed through there with the show summary in memory.
+		if (isDesktop() && anime) {
+			void getAnimeListState(
+				showId,
+				anime.title,
+				anime.available_episodes || null,
+				anime.anilist_id ?? null
+			).catch(() => {});
+		}
 		try {
 			const [srcs, ws, mb] = await Promise.all([
 				getSources(showId, episode, isDub),

@@ -9,6 +9,7 @@
 	import { page } from '$app/state';
 	import {
 		anilistStatus,
+		anilistSyncNow,
 		onEvent,
 		isDesktop,
 		type RemoteOverwrite
@@ -26,6 +27,16 @@
 		}
 	}
 
+	type PushOutcome = {
+		anilist_id: number;
+		progress: number;
+		status: string;
+		completed: boolean;
+	};
+	// Toast the unmapped warning once per show per session, not on every
+	// throttled watch-state write past the threshold.
+	const unmappedSeen = new Set<string>();
+
 	$effect(() => {
 		refreshAuth();
 		const unlisteners = [
@@ -36,9 +47,30 @@
 			onEvent('sync:auth-expired', () => {
 				refreshAuth();
 				pushToast('AniList session expired — sign in again in Settings.', 'info');
+			}),
+			onEvent<PushOutcome>('sync:pushed', (p) => {
+				pushToast(
+					p.completed ? 'AniList: marked Completed 🎉' : `AniList: progress → Ep ${p.progress}`,
+					'sync'
+				);
+			}),
+			onEvent<PushOutcome>('sync:queued', (p) => {
+				pushToast(`AniList: Ep ${p.progress} queued — syncs when connected`, 'info');
+			}),
+			onEvent<string>('sync:unmapped', (providerId) => {
+				if (unmappedSeen.has(providerId)) return;
+				unmappedSeen.add(providerId);
+				pushToast('Show not linked to AniList — progress kept locally only', 'info');
 			})
 		];
+		// Drain the queue the moment connectivity returns instead of waiting
+		// for the periodic worker.
+		const onOnline = () => {
+			if (isDesktop()) void anilistSyncNow().catch(() => {});
+		};
+		window.addEventListener('online', onOnline);
 		return () => {
+			window.removeEventListener('online', onOnline);
 			for (const u of unlisteners) u.then((fn) => fn());
 		};
 	});

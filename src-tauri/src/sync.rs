@@ -13,7 +13,7 @@
 
 use crate::AppState;
 use anidoku_core::anilist::SaveEntry;
-use anidoku_core::models::ListEntry;
+use anidoku_core::models::{ListEntry, MediaListStatus};
 use anidoku_core::sync::{backoff_secs, merge, plan_drain, QueuedMutation};
 use anidoku_core::Error;
 use serde::Serialize;
@@ -42,16 +42,43 @@ pub struct RemoteOverwrite {
     pub title: Option<String>,
 }
 
+/// Payload for `sync:pushed` / `sync:queued`, so the UI can toast the outcome
+/// of a local edit instead of syncing silently.
+#[derive(Clone, Serialize)]
+pub struct PushOutcome {
+    pub anilist_id: i64,
+    pub progress: i64,
+    pub status: String,
+    pub completed: bool,
+}
+
 /// Enqueue a mutation for an already-persisted local entry and trigger a drain.
 pub fn push_local(state: &AppState, app: &AppHandle, entry: &ListEntry) {
     let save = save_entry_of(entry);
     if let Ok(json) = serde_json::to_string(&save) {
         let _ = state.db.enqueue_mutation(entry.anilist_id, &json);
     }
-    // Fire-and-forget drain; safe to run even when offline (it no-ops).
+    let outcome = PushOutcome {
+        anilist_id: entry.anilist_id,
+        progress: entry.progress,
+        status: entry.status.as_str().to_string(),
+        completed: entry.status == MediaListStatus::Completed,
+    };
+    // Drain now (no-ops when offline/logged out), then report whether the
+    // mutation actually left the queue so the UI can say "synced" vs "queued".
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         drain(&app).await;
+        let state = app.state::<AppState>();
+        let still_queued = state
+            .db
+            .queued_mutations()
+            .map(|q| q.iter().any(|m| m.anilist_id == outcome.anilist_id))
+            .unwrap_or(true);
+        let _ = app.emit(
+            if still_queued { "sync:queued" } else { "sync:pushed" },
+            outcome,
+        );
     });
 }
 
