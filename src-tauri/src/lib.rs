@@ -6,6 +6,7 @@ mod commands;
 mod stream;
 
 use anidoku_core::db::Database;
+use anidoku_core::media_server;
 use anidoku_core::provider::allanime::AllAnime;
 use anidoku_core::proxy::ProxyClient;
 use std::sync::Arc;
@@ -15,6 +16,10 @@ pub struct AppState {
     pub provider: AllAnime,
     pub db: Database,
     pub proxy: Arc<ProxyClient>,
+    /// Base URL of the loopback media server, e.g. `http://127.0.0.1:52123`.
+    /// The UI fetches this once and routes all playback (MP4/HLS/subtitles)
+    /// through it so Range/Referer are handled correctly.
+    pub media_base: String,
 }
 
 impl AppState {
@@ -24,10 +29,19 @@ impl AppState {
             .join("AniDoku")
             .join("anidoku.db");
         let db = Database::open(&db_path).expect("open database");
+        let proxy = Arc::new(ProxyClient::new());
+
+        // Start the loopback media server before the webview loads. Tauri's
+        // async runtime is Tokio, so we can block on the bind here.
+        let media = tauri::async_runtime::block_on(media_server::spawn(proxy.clone()))
+            .expect("start media server");
+        eprintln!("media server listening on {}", media.base);
+
         AppState {
             provider: AllAnime::new(),
             db,
-            proxy: Arc::new(ProxyClient::new()),
+            proxy,
+            media_base: media.base,
         }
     }
 }
@@ -40,6 +54,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(state)
+        // `stream://` now serves cover images only (referer-gated thumbnails);
+        // all playback media goes through the loopback HTTP media server.
         .register_asynchronous_uri_scheme_protocol("stream", move |_ctx, request, responder| {
             stream::handle(proxy.clone(), request, responder);
         })
@@ -51,6 +67,7 @@ pub fn run() {
             commands::set_watch_state,
             commands::list_watch_states,
             commands::convert_subtitles,
+            commands::media_base,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AniDoku");

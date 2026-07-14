@@ -95,3 +95,10 @@ pub fn list_watch_states(
 pub fn convert_subtitles(content: String, format_hint: String) -> CmdResult<String> {
     anidoku_core::subs::to_vtt(&content, &format_hint).map_err(map_err)
 }
+
+/// Base URL of the loopback media server the UI should route playback through,
+/// e.g. `http://127.0.0.1:52123`.
+#[tauri::command]
+pub fn media_base(state: State<'_, AppState>) -> CmdResult<String> {
+    Ok(state.media_base.clone())
+}
