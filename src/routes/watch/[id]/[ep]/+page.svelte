@@ -44,6 +44,10 @@
 		const i = episodes.indexOf(ep);
 		return i >= 0 && i + 1 < episodes.length ? episodes[i + 1] : null;
 	});
+	const prevEp = $derived.by(() => {
+		const i = episodes.indexOf(ep);
+		return i > 0 ? episodes[i - 1] : null;
+	});
 	// The media-server URL currently attached, so playback errors can name it.
 	let currentUrl = $state<string | null>(null);
 
@@ -178,8 +182,12 @@
 		if (video) void setWatchState(id, ep, video.currentTime, isFinite(video.duration) ? video.duration : null);
 	}
 
+	function goTo(episode: string) {
+		goto(`/watch/${encodeURIComponent(id)}/${encodeURIComponent(episode)}?dub=${dub ? 1 : 0}`);
+	}
+
 	function goNext() {
-		if (nextEp) goto(`/watch/${encodeURIComponent(id)}/${encodeURIComponent(nextEp)}?dub=${dub ? 1 : 0}`);
+		if (nextEp) goTo(nextEp);
 	}
 
 	function onended() {
@@ -360,6 +368,9 @@
 			<span class="label">Player</span>
 			<div class="row">
 				<Button variant="secondary" onclick={() => void toggleFullscreen()}>⛶ Fullscreen</Button>
+				{#if prevEp}
+					<Button variant="secondary" onclick={() => goTo(prevEp)}>← Ep {prevEp}</Button>
+				{/if}
 				{#if nextEp}
 					<Button onclick={goNext}>Next episode ({nextEp}) →</Button>
 				{/if}
