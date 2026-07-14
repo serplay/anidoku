@@ -28,12 +28,15 @@
 		align-items: center;
 		gap: var(--space-xs);
 		background: var(--color-surface-card);
+		border: 1px solid transparent;
 		border-radius: var(--radius-lg);
 		padding: 10px 16px;
 		height: 40px;
 	}
+	/* No blue focus ring — a one-step surface lift marks focus instead. */
 	.search:focus-within {
-		box-shadow: var(--focus-ring);
+		background: var(--color-surface-elevated);
+		border-color: var(--color-hairline);
 	}
 	.icon {
 		width: 18px;
