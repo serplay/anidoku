@@ -115,6 +115,22 @@ watch_state  (anime_id, episode_number, position_secs, updated_at)  -- resume po
 
 **M3 — Downloads + manager (desktop):** HLS segment download engine (pause/resume/cancel, concurrency limits); enqueue single/range/season; manager view per DESIGN.md table conventions (progress, speed, storage per anime, bulk delete); offline playback via local media protocol; downloaded subtitle tracks.
 
+**M3.5 — Home page + airing tracker & notification inbox:**
+
+*Home page* (new `/` landing; search moves to `/search`; nav: Home · Search · Library · Downloads · Settings):
+- **Continue Watching** row first (most useful): local data only — CURRENT list entries joined with watch_state; each card deep-links to the next unwatched episode. Works offline.
+- **Trending Now**, **Popular This Season**, **Upcoming Next Season** rows: AniList public GraphQL (no auth) — `media(sort: TRENDING_DESC, status: RELEASING)`, `media(season, seasonYear, sort: POPULARITY_DESC)`, and next season's equivalent. One batched query per section, 12–20 items each.
+- Layout per DESIGN.md: horizontally scrollable card rows (reuse AnimeCard + Skeleton), section heads in `title-lg`, dark canvas. Airing shows carry a small "Ep N in Xd" caption from `nextAiringEpisode`.
+- Caching: `home_cache` table (section, json, fetched_at), 6h TTL — instant render on launch, offline-tolerant, kind to the 90 req/min budget.
+- Card click → AniList id → provider id: reuse an existing mapping, else provider title-search matched by the aniListId the provider carries (sync matching, reversed). New command `resolve_provider_for_anilist`.
+
+*Airing tracker + notification inbox:*
+- **Data**: for list entries with status CURRENT/REPEATING (PLANNING via Settings toggle) whose media is RELEASING: `nextAiringEpisode { episode airingAt }`, fetched in ONE batched `media(id_in: [...])` query (50/page).
+- **DB**: `airing (anilist_id PK, next_episode, airing_at, media_status, refreshed_at)`; `notifications (id PK, anilist_id, episode, airing_at, kind, created_at, read)`.
+- **Worker** (same pattern as sync.rs): refresh airing on startup, after each list pull, and every 6h. A 60s ticker moves rows with `airing_at <= now` into `notifications`, emits `notify:new` (toast + badge) and fires an OS notification via `tauri-plugin-notification`. Airings missed while the app was closed notify once on startup. De-dupe on (anilist_id, episode).
+- **Inbox UI**: bell in the top nav with unread badge → panel with **Upcoming** (per tracked show: cover, "Ep N airs <weekday, local time>" + countdown) and **New episodes** (fired, newest first; click → detail page or straight to the episode when a provider mapping exists); mark-all-read + clear.
+- Lifecycle: `nextAiringEpisode == null` / media FINISHED ⇒ untrack (final episode still notifies); shows leaving Watching stop being tracked at next refresh.
+
 **M4 — Android:** mobile-responsive UI pass (DESIGN.md already specifies breakpoints); foreground-service download shim; deep-link OAuth verified; playback via hls.js in Android WebView; APK distribution (direct/F-Droid-style — not Play Store).
 
 **M5 — iOS:** native-HLS playback path in WKWebView; background `URLSession` download shim; sideload/AltStore distribution and signing story.
