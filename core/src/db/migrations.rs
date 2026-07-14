@@ -76,6 +76,25 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (anime_id, episode_number)
     );
     ",
+    // 002: sync-queue retry scheduling. `next_attempt_at` lets the drainer
+    // apply exponential backoff without a separate bookkeeping table.
+    "
+    ALTER TABLE sync_queue ADD COLUMN next_attempt_at INTEGER NOT NULL DEFAULT 0;
+    ",
+    // 003: AniList media metadata cache, keyed by anilist_id. Library entries
+    // pulled from AniList often have no provider mapping yet, so their titles /
+    // covers / episode counts can't live in the provider-keyed `anime` table.
+    "
+    CREATE TABLE media_cache (
+        anilist_id    INTEGER PRIMARY KEY,
+        title_romaji  TEXT,
+        title_english TEXT,
+        cover_url     TEXT,
+        episode_count INTEGER,
+        format        TEXT,
+        cached_at     INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    ",
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

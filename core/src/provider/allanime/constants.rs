@@ -31,7 +31,7 @@ pub const EPISODE_QUERY_HASH: &str =
 pub const SEARCH_GQL: &str = "query( $search: SearchInput $limit: Int $page: Int \
 $translationType: VaildTranslationTypeEnumType $countryOrigin: VaildCountryOriginEnumType ) { \
 shows( search: $search limit: $limit page: $page translationType: $translationType \
-countryOrigin: $countryOrigin ) { edges { _id name englishName thumbnail availableEpisodes __typename } }}";
+countryOrigin: $countryOrigin ) { edges { _id name englishName aniListId thumbnail availableEpisodes __typename } }}";
 
 /// Episode list query (ani-cli `episodes_list_gql`).
 pub const EPISODES_LIST_GQL: &str =

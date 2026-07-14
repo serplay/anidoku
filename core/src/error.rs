@@ -19,6 +19,18 @@ pub enum Error {
 
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("anilist error: {0}")]
+    AniList(String),
+
+    /// AniList rejected the token (401). Surfaced to the UI as a re-login
+    /// prompt rather than a hard error — see the sync worker.
+    #[error("anilist authentication expired")]
+    Unauthorized,
+
+    /// AniList rate limit hit (429). Carries the retry-after in seconds.
+    #[error("anilist rate limited; retry after {0}s")]
+    RateLimited(u64),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

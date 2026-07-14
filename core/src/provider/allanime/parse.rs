@@ -44,12 +44,22 @@ pub fn parse_search(body: &str) -> Result<Vec<AnimeSummary>> {
             })
             .unwrap_or(0) as u32;
 
+        // allanime exposes `aniListId` on the Show, usually a string like
+        // "154587" (occasionally a number, occasionally null/empty). It is an
+        // exact AniList media-id mapping, so keep it when parseable.
+        let anilist_id = e.get("aniListId").and_then(|v| match v {
+            Value::String(s) => s.trim().parse::<i64>().ok(),
+            Value::Number(n) => n.as_i64(),
+            _ => None,
+        });
+
         out.push(AnimeSummary {
             provider_id: id.to_string(),
             title,
             title_english,
             cover_url,
             available_episodes,
+            anilist_id,
         });
     }
     Ok(out)
@@ -184,8 +194,8 @@ mod tests {
     #[test]
     fn parse_search_extracts_fields() {
         let body = r#"{"data":{"shows":{"edges":[
-            {"_id":"abc","name":"Frieren","englishName":"Frieren: Beyond","thumbnail":"http://x/c.jpg","availableEpisodes":{"sub":28,"dub":12,"raw":0},"__typename":"Show"},
-            {"_id":"def","name":"No English","availableEpisodes":{"sub":5},"__typename":"Show"}
+            {"_id":"abc","name":"Frieren","englishName":"Frieren: Beyond","aniListId":"154587","thumbnail":"http://x/c.jpg","availableEpisodes":{"sub":28,"dub":12,"raw":0},"__typename":"Show"},
+            {"_id":"def","name":"No English","aniListId":"","availableEpisodes":{"sub":5},"__typename":"Show"}
         ]}}}"#;
         let r = parse_search(body).unwrap();
         assert_eq!(r.len(), 2);
@@ -194,9 +204,11 @@ mod tests {
         assert_eq!(r[0].title_english.as_deref(), Some("Frieren: Beyond"));
         assert_eq!(r[0].cover_url.as_deref(), Some("http://x/c.jpg"));
         assert_eq!(r[0].available_episodes, 28);
+        assert_eq!(r[0].anilist_id, Some(154587));
         assert_eq!(r[1].title_english, None);
         assert_eq!(r[1].cover_url, None);
         assert_eq!(r[1].available_episodes, 5);
+        assert_eq!(r[1].anilist_id, None);
     }
 
     #[test]

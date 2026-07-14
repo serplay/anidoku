@@ -5,6 +5,7 @@
 //! the streaming proxy that injects referer headers for the webview player,
 //! and subtitle conversion.
 
+pub mod anilist;
 pub mod db;
 pub mod error;
 pub mod media_server;
@@ -13,5 +14,6 @@ pub mod provider;
 pub mod proxy;
 pub mod range;
 pub mod subs;
+pub mod sync;
 
 pub use error::{Error, Result};
