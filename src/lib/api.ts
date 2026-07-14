@@ -3,6 +3,7 @@
 // still build and render.
 
 import { invoke as tauriInvoke } from '@tauri-apps/api/core';
+import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 
 export interface AnimeSummary {
 	provider_id: string;
@@ -10,6 +11,7 @@ export interface AnimeSummary {
 	title_english: string | null;
 	cover_url: string | null;
 	available_episodes: number;
+	anilist_id: number | null;
 }
 
 export type StreamKind = 'hls' | 'mp4';
@@ -89,6 +91,167 @@ export function convertSubtitles(content: string, formatHint: string): Promise<s
 // Base URL of the loopback media server (e.g. http://127.0.0.1:52123).
 export function mediaBase(): Promise<string> {
 	return invoke('media_base');
+}
+
+// ---------------------------------------------------------------------------
+// AniList sync (M2)
+// ---------------------------------------------------------------------------
+
+export type MediaListStatus =
+	| 'CURRENT'
+	| 'PLANNING'
+	| 'COMPLETED'
+	| 'DROPPED'
+	| 'PAUSED'
+	| 'REPEATING';
+
+export const STATUS_ORDER: MediaListStatus[] = [
+	'CURRENT',
+	'PLANNING',
+	'COMPLETED',
+	'PAUSED',
+	'DROPPED',
+	'REPEATING'
+];
+
+export const STATUS_LABEL: Record<MediaListStatus, string> = {
+	CURRENT: 'Watching',
+	PLANNING: 'Planning',
+	COMPLETED: 'Completed',
+	PAUSED: 'Paused',
+	DROPPED: 'Dropped',
+	REPEATING: 'Rewatching'
+};
+
+export interface Viewer {
+	id: number;
+	name: string;
+	avatar_url: string | null;
+}
+
+export interface ListEntry {
+	anilist_id: number;
+	status: MediaListStatus;
+	progress: number;
+	score: number | null;
+	local_updated_at: number;
+	remote_updated_at: number | null;
+	dirty: boolean;
+}
+
+export interface LibraryItem {
+	anilist_id: number;
+	status: MediaListStatus;
+	progress: number;
+	score: number | null;
+	dirty: boolean;
+	title_romaji: string | null;
+	title_english: string | null;
+	cover_url: string | null;
+	episode_count: number | null;
+	provider_id: string | null;
+}
+
+export interface MediaInfo {
+	anilist_id: number;
+	title_romaji: string | null;
+	title_english: string | null;
+	title_native: string | null;
+	synonyms: string[];
+	cover_url: string | null;
+	episode_count: number | null;
+	format: string | null;
+}
+
+export interface Settings {
+	client_id: string | null;
+	redirect_url: string;
+}
+
+export interface AuthStatus {
+	viewer: Viewer | null;
+	logged_in: boolean;
+	expired: boolean;
+	has_client_id: boolean;
+}
+
+export interface AnimeListState {
+	anilist_id: number | null;
+	entry: ListEntry | null;
+	episode_count: number | null;
+}
+
+export function getSettings(): Promise<Settings> {
+	return invoke('get_settings');
+}
+
+export function setClientId(clientId: string | null): Promise<void> {
+	return invoke('set_client_id', { clientId });
+}
+
+export function anilistStatus(): Promise<AuthStatus> {
+	return invoke('anilist_status');
+}
+
+export function anilistLogin(): Promise<Viewer> {
+	return invoke('anilist_login');
+}
+
+export function anilistLogout(): Promise<void> {
+	return invoke('anilist_logout');
+}
+
+export function anilistSyncNow(): Promise<void> {
+	return invoke('anilist_sync_now');
+}
+
+export function getLibrary(): Promise<LibraryItem[]> {
+	return invoke('get_library');
+}
+
+export function setListEntry(
+	anilistId: number,
+	status: MediaListStatus,
+	progress: number,
+	score: number | null
+): Promise<ListEntry> {
+	return invoke('set_list_entry', { anilistId, status, progress, score });
+}
+
+export function getAnimeListState(
+	providerId: string,
+	title: string,
+	episodes: number | null,
+	anilistHint: number | null
+): Promise<AnimeListState> {
+	return invoke('get_anime_list_state', {
+		providerId,
+		title,
+		episodes,
+		anilistHint
+	});
+}
+
+export function searchAnilist(query: string): Promise<MediaInfo[]> {
+	return invoke('search_anilist', { query });
+}
+
+export function setAnimeMapping(providerId: string, anilistId: number): Promise<void> {
+	return invoke('set_anime_mapping', { providerId, anilistId });
+}
+
+// AniList cover images are served from s4.anilist.co without referer gating, so
+// they can be used directly (no stream:// proxy needed).
+
+export interface RemoteOverwrite {
+	anilist_id: number;
+	title: string | null;
+}
+
+// Subscribe to a Tauri event; no-ops (returns a noop unlisten) in a browser.
+export function onEvent<T>(event: string, handler: (payload: T) => void): Promise<UnlistenFn> {
+	if (!inTauri()) return Promise.resolve(() => {});
+	return listen<T>(event, (e) => handler(e.payload));
 }
 
 // Build a `stream://` URL for referer-gated cover images. The custom scheme is

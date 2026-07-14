@@ -2,13 +2,17 @@
 //! the Svelte UI over Tauri IPC, and registers the `stream://` proxy protocol
 //! that lets the webview player fetch referer-gated media.
 
+mod auth;
 mod commands;
 mod stream;
+mod sync;
 
+use anidoku_core::anilist::AniListClient;
 use anidoku_core::db::Database;
 use anidoku_core::media_server;
 use anidoku_core::provider::allanime::AllAnime;
 use anidoku_core::proxy::ProxyClient;
+use auth::AuthStore;
 use std::sync::Arc;
 
 /// Shared application state, injected into every command.
@@ -20,16 +24,21 @@ pub struct AppState {
     /// The UI fetches this once and routes all playback (MP4/HLS/subtitles)
     /// through it so Range/Referer are handled correctly.
     pub media_base: String,
+    /// AniList GraphQL client (M2 sync).
+    pub anilist: AniListClient,
+    /// OAuth token + client-id storage (app-data file, 0600).
+    pub auth: AuthStore,
 }
 
 impl AppState {
     fn new() -> Self {
-        let db_path = dirs::data_dir()
+        let data_dir = dirs::data_dir()
             .unwrap_or_else(std::env::temp_dir)
-            .join("AniDoku")
-            .join("anidoku.db");
+            .join("AniDoku");
+        let db_path = data_dir.join("anidoku.db");
         let db = Database::open(&db_path).expect("open database");
         let proxy = Arc::new(ProxyClient::new());
+        let auth = AuthStore::load(&data_dir);
 
         // Start the loopback media server before the webview loads. Tauri's
         // async runtime is Tokio, so we can block on the bind here.
@@ -42,6 +51,8 @@ impl AppState {
             db,
             proxy,
             media_base: media.base,
+            anilist: AniListClient::new(),
+            auth,
         }
     }
 }
@@ -59,6 +70,12 @@ pub fn run() {
         .register_asynchronous_uri_scheme_protocol("stream", move |_ctx, request, responder| {
             stream::handle(proxy.clone(), request, responder);
         })
+        .setup(|app| {
+            // Background AniList sync worker: startup pull + periodic drain/pull.
+            // No-ops while logged out, so it is always safe to spawn.
+            sync::spawn_worker(app.handle().clone());
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             commands::search_anime,
             commands::get_episodes,
@@ -68,6 +85,17 @@ pub fn run() {
             commands::list_watch_states,
             commands::convert_subtitles,
             commands::media_base,
+            commands::get_settings,
+            commands::set_client_id,
+            commands::anilist_status,
+            commands::anilist_login,
+            commands::anilist_logout,
+            commands::anilist_sync_now,
+            commands::get_library,
+            commands::set_list_entry,
+            commands::get_anime_list_state,
+            commands::search_anilist,
+            commands::set_anime_mapping,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AniDoku");

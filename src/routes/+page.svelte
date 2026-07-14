@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { page } from '$app/state';
 	import { searchAnime, isDesktop, type AnimeSummary } from '$lib/api';
 	import { rememberAnime, searchState } from '$lib/state.svelte';
 	import SearchInput from '$lib/components/SearchInput.svelte';
@@ -11,6 +12,16 @@
 	let loading = $state(false);
 	let error = $state<string | null>(null);
 	let results = $state<AnimeSummary[]>(searchState.results);
+
+	// A `?q=` param (e.g. from a Library entry with no stream source) pre-fills
+	// and runs the search once.
+	$effect(() => {
+		const q = page.url.searchParams.get('q');
+		if (q && q !== searchState.query) {
+			query = q;
+			void run();
+		}
+	});
 
 	async function run() {
 		const q = query.trim();

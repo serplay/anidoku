@@ -2,7 +2,7 @@
 // without a redundant provider round-trip. Backed by an in-memory rune plus
 // sessionStorage for reload survival.
 
-import type { AnimeSummary } from '$lib/api';
+import type { AnimeSummary, AuthStatus } from '$lib/api';
 
 const KEY = 'anidoku:anime-cache';
 
@@ -34,3 +34,38 @@ export const searchState = $state<{ query: string; results: AnimeSummary[]; dub:
 	results: [],
 	dub: false
 });
+
+// Shared AniList auth status, kept in sync across the nav, settings and library.
+export const authState = $state<AuthStatus>({
+	viewer: null,
+	logged_in: false,
+	expired: false,
+	has_client_id: false
+});
+
+export function setAuthStatus(s: AuthStatus) {
+	authState.viewer = s.viewer;
+	authState.logged_in = s.logged_in;
+	authState.expired = s.expired;
+	authState.has_client_id = s.has_client_id;
+}
+
+// Lightweight toast queue (DESIGN.md has no toast spec; we keep it minimal and
+// on-brand: dark card, yellow accent for the "synced" confirmation).
+export interface Toast {
+	id: number;
+	message: string;
+	kind: 'info' | 'sync';
+}
+
+let toastSeq = 0;
+export const toasts = $state<Toast[]>([]);
+
+export function pushToast(message: string, kind: Toast['kind'] = 'info') {
+	const id = ++toastSeq;
+	toasts.push({ id, message, kind });
+	setTimeout(() => {
+		const i = toasts.findIndex((t) => t.id === id);
+		if (i >= 0) toasts.splice(i, 1);
+	}, 5000);
+}
