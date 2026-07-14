@@ -14,6 +14,7 @@
 	const cover = $derived(
 		anime.cover_url ? streamUrl(anime.cover_url, 'https://youtu-chan.com') : null
 	);
+	const display = $derived(anime.title_english ?? anime.title);
 </script>
 
 <button class="card" onclick={() => onselect?.(anime)}>
@@ -26,12 +27,20 @@
 		<span class="badge">{anime.available_episodes} ep</span>
 	</div>
 	<div class="meta">
-		<span class="title" title={anime.title}>{anime.title_english ?? anime.title}</span>
+		<span class="title">{display}</span>
+	</div>
+	<!-- Full-title tooltip: card titles clamp to 2 lines, so long ones cut off. -->
+	<div class="tooltip" role="tooltip">
+		<span class="t-main">{display}</span>
+		{#if anime.title !== display}
+			<span class="t-sub">{anime.title}</span>
+		{/if}
 	</div>
 </button>
 
 <style>
 	.card {
+		position: relative;
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-xs);
@@ -40,6 +49,38 @@
 		padding: 0;
 		text-align: left;
 		cursor: pointer;
+	}
+	.tooltip {
+		position: absolute;
+		top: 100%;
+		left: 0;
+		z-index: 20;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+		min-width: 100%;
+		width: max-content;
+		max-width: 260px;
+		background: var(--color-surface-elevated);
+		border: 1px solid var(--color-hairline);
+		border-radius: var(--radius-md);
+		padding: var(--space-xs) var(--space-sm);
+		opacity: 0;
+		pointer-events: none;
+		transform: translateY(2px);
+		transition: opacity 0.15s ease 0.3s;
+	}
+	.card:hover .tooltip,
+	.card:focus-visible .tooltip {
+		opacity: 1;
+	}
+	.t-main {
+		font: var(--text-title-sm);
+		color: var(--color-on-dark);
+	}
+	.t-sub {
+		font: var(--text-body-sm);
+		color: var(--color-muted-strong);
 	}
 	.cover {
 		position: relative;
