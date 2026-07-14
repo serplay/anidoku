@@ -1,0 +1,924 @@
+//! Offline download engine.
+//!
+//! A `DownloadManager` runs a scheduler over the persistent `downloads` table
+//! (SQLite): rows move queued → downloading → done, with paused/failed
+//! transitions and resume checkpoints (`bytes_done` for MP4 byte-offset
+//! resume, `segments_done` for HLS segment-index resume). Cancel deletes the
+//! row and its files. In-flight rows revert to `queued` at startup so a killed
+//! app resumes where it stopped.
+//!
+//! Storage layout, under the app-data downloads root:
+//!   <anime_id>/<episode>/video.mp4              (MP4)
+//!   <anime_id>/<episode>/index.m3u8 + seg_*.ts  (HLS, playlist localized)
+//!   <anime_id>/<episode>/sub_XX_<lang>.vtt      (subtitles, converted to VTT)
+//!   <anime_id>/<episode>/manifest.json          (written on completion)
+
+pub mod hls;
+
+use crate::db::Database;
+use crate::models::{DownloadRow, DownloadState, StreamKind, SubtitleTrack, VideoSource};
+use crate::provider::{allanime::playability_rank, Provider};
+use crate::proxy::ProxyClient;
+use crate::{Error, Result};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tokio::io::AsyncWriteExt;
+use tokio::sync::{mpsc, Notify};
+
+/// Global concurrency limit: how many episodes download at once.
+pub const MAX_ACTIVE_DOWNLOADS: usize = 2;
+/// How many HLS segments are fetched concurrently within one job.
+pub const SEGMENT_CONCURRENCY: usize = 4;
+/// Minimum interval between progress events/persists (~2 per second).
+pub const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
+/// Per-request timeout for segment fetches / MP4 chunk reads.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(45);
+
+// Control-flag codes (checked by running jobs between chunks/segments).
+const CTL_RUN: u8 = 0;
+const CTL_PAUSE: u8 = 1;
+const CTL_CANCEL: u8 = 2;
+
+/// Is `from` → `to` a legal state transition?
+///
+///   queued      → downloading (claim), paused (user pause before start)
+///   downloading → done, failed, paused, queued (startup recovery)
+///   paused      → queued (resume)
+///   failed      → queued (retry)
+///   done        → terminal (delete removes the row)
+pub fn can_transition(from: DownloadState, to: DownloadState) -> bool {
+    use DownloadState::*;
+    matches!(
+        (from, to),
+        (Queued, Downloading)
+            | (Queued, Paused)
+            | (Downloading, Done)
+            | (Downloading, Failed)
+            | (Downloading, Paused)
+            | (Downloading, Queued)
+            | (Paused, Queued)
+            | (Failed, Queued)
+    )
+}
+
+/// Parse the leading number of a quality label ("1080", "1080p" → 1080).
+pub fn quality_num(q: &str) -> Option<i64> {
+    let digits: String = q.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
+}
+
+/// Choose the source to download for a desired quality preference ("best" or
+/// a number like "720"). Embed pages (playability rank 2) are not downloadable
+/// and are excluded; direct media (rank 0) beats unknown (rank 1). An HLS
+/// master with a non-numeric quality can serve any preference via its
+/// variants, so it scores as a near-exact match.
+pub fn pick_source<'a>(sources: &'a [VideoSource], desired: &str) -> Option<&'a VideoSource> {
+    let want = quality_num(desired);
+    sources
+        .iter()
+        .filter(|s| playability_rank(s) < 2)
+        .min_by_key(|s| {
+            let rank = playability_rank(s);
+            let num = quality_num(&s.quality);
+            let dist: i64 = match (want, num) {
+                // Numeric preference with a numeric label: distance.
+                (Some(w), Some(n)) => (n - w).abs(),
+                // Numeric preference, unlabeled: HLS can adapt (variants),
+                // an unlabeled MP4 is a gamble.
+                (Some(_), None) if s.kind == StreamKind::Hls => 1,
+                (Some(_), None) => 400,
+                // "best": higher resolution is better; unlabeled HLS sits
+                // between 720 and 1080.
+                (None, Some(n)) => 10_000 - n,
+                (None, None) if s.kind == StreamKind::Hls => 10_000 - 900,
+                (None, None) => 10_000 - 400,
+            };
+            (rank, dist)
+        })
+}
+
+/// Sanitize an id/episode string into a filesystem-safe path component.
+pub fn sanitize_component(s: &str) -> String {
+    let out: String = s
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .collect();
+    // Avoid empty names and dot-only names like "..".
+    if out.is_empty() || out.chars().all(|c| c == '.') {
+        "_".to_string()
+    } else {
+        out
+    }
+}
+
+/// Episode directory relative to the downloads root.
+pub fn episode_dir_rel(anime_id: &str, episode: &str) -> String {
+    format!("{}/{}", sanitize_component(anime_id), sanitize_component(episode))
+}
+
+/// Written to `<episode dir>/manifest.json` on completion; the offline
+/// playback path reads it to build the player URL + subtitle tracks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Manifest {
+    pub kind: StreamKind,
+    pub quality: String,
+    /// Video entry point, relative to the episode dir ("video.mp4" or
+    /// "index.m3u8").
+    pub video: String,
+    pub subtitles: Vec<ManifestSub>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestSub {
+    pub label: String,
+    pub lang: String,
+    pub file: String,
+}
+
+/// Read the completion manifest for an episode dir (relative to `root`).
+pub fn read_manifest(root: &Path, dir_rel: &str) -> Option<Manifest> {
+    let text = std::fs::read_to_string(root.join(dir_rel).join("manifest.json")).ok()?;
+    serde_json::from_str(&text).ok()
+}
+
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProgressPayload {
+    pub id: i64,
+    pub anime_id: String,
+    pub episode_number: String,
+    pub bytes_done: i64,
+    pub bytes_total: Option<i64>,
+    pub segments_done: i64,
+    pub segments_total: Option<i64>,
+    /// Bytes per second over the last progress interval.
+    pub speed_bps: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct StatePayload {
+    pub id: i64,
+    pub anime_id: String,
+    pub episode_number: String,
+    pub state: DownloadState,
+    pub error: Option<String>,
+    /// True when the row was removed entirely (cancel / delete).
+    pub removed: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum DownloadEvent {
+    Progress(ProgressPayload),
+    State(StatePayload),
+}
+
+// ---------------------------------------------------------------------------
+// Manager
+// ---------------------------------------------------------------------------
+
+pub struct DownloadManager {
+    db: Arc<Database>,
+    proxy: Arc<ProxyClient>,
+    provider: Arc<dyn Provider>,
+    root: PathBuf,
+    events: mpsc::UnboundedSender<DownloadEvent>,
+    /// Control flags for active jobs (pause/cancel requests).
+    controls: Mutex<HashMap<i64, Arc<AtomicU8>>>,
+    wake: Notify,
+}
+
+enum JobOutcome {
+    Done,
+    Paused,
+    Canceled,
+}
+
+impl DownloadManager {
+    pub fn new(
+        db: Arc<Database>,
+        proxy: Arc<ProxyClient>,
+        provider: Arc<dyn Provider>,
+        root: PathBuf,
+        events: mpsc::UnboundedSender<DownloadEvent>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            db,
+            proxy,
+            provider,
+            root,
+            events,
+            controls: Mutex::new(HashMap::new()),
+            wake: Notify::new(),
+        })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// Recover in-flight rows and start the scheduler loop. Must be called
+    /// from within a Tokio runtime.
+    pub fn start(self: &Arc<Self>) {
+        let _ = self.db.recover_in_flight_downloads();
+        let mgr = self.clone();
+        tokio::spawn(async move { mgr.scheduler().await });
+    }
+
+    /// Enqueue one episode. Returns the row id, or None when the episode is
+    /// already queued/downloading/paused/done.
+    pub fn enqueue(
+        &self,
+        anime_id: &str,
+        episode: &str,
+        quality: Option<&str>,
+        dub: bool,
+    ) -> Result<Option<i64>> {
+        let id = self.db.enqueue_download(anime_id, episode, quality, dub)?;
+        if let Some(id) = id {
+            if let Ok(Some(row)) = self.db.get_download(id) {
+                self.emit_state(&row, None, false);
+            }
+            self.wake.notify_one();
+        }
+        Ok(id)
+    }
+
+    /// Pause a job: flags an active job (it checkpoints and stops), or moves a
+    /// queued row directly to paused.
+    pub fn pause(&self, id: i64) -> Result<()> {
+        if let Some(flag) = self.controls.lock().unwrap().get(&id) {
+            flag.store(CTL_PAUSE, Ordering::SeqCst);
+            return Ok(());
+        }
+        let row = self.row(id)?;
+        if !can_transition(row.state, DownloadState::Paused) {
+            return Err(Error::Download(format!("cannot pause a {} download", row.state.as_str())));
+        }
+        self.db.set_download_state(id, DownloadState::Paused, None)?;
+        self.emit_row_state(id, false);
+        Ok(())
+    }
+
+    /// Resume a paused (or retry a failed) job by re-queueing it.
+    pub fn resume(&self, id: i64) -> Result<()> {
+        let row = self.row(id)?;
+        if !can_transition(row.state, DownloadState::Queued) {
+            return Err(Error::Download(format!("cannot resume a {} download", row.state.as_str())));
+        }
+        self.db.set_download_state(id, DownloadState::Queued, None)?;
+        self.emit_row_state(id, false);
+        self.wake.notify_one();
+        Ok(())
+    }
+
+    /// Cancel/delete a download: an active job is flagged (its files + row are
+    /// removed once it stops); any other row is removed immediately.
+    pub fn remove(&self, id: i64) -> Result<()> {
+        if let Some(flag) = self.controls.lock().unwrap().get(&id) {
+            flag.store(CTL_CANCEL, Ordering::SeqCst);
+            return Ok(());
+        }
+        let row = self.row(id)?;
+        self.delete_row_and_files(&row);
+        Ok(())
+    }
+
+    /// Delete every completed download of one show.
+    pub fn remove_anime_completed(&self, anime_id: &str) -> Result<usize> {
+        let rows = self.db.downloads_for_anime(anime_id)?;
+        let mut n = 0;
+        for row in rows.iter().filter(|r| r.state == DownloadState::Done) {
+            self.delete_row_and_files(row);
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// Delete all completed downloads (bulk cleanup).
+    pub fn remove_all_completed(&self) -> Result<usize> {
+        let rows = self.db.list_downloads()?;
+        let mut n = 0;
+        for row in rows.iter().filter(|r| r.state == DownloadState::Done) {
+            self.delete_row_and_files(row);
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    // -- internals ----------------------------------------------------------
+
+    fn row(&self, id: i64) -> Result<DownloadRow> {
+        self.db
+            .get_download(id)?
+            .ok_or_else(|| Error::Download(format!("download {id} not found")))
+    }
+
+    fn delete_row_and_files(&self, row: &DownloadRow) {
+        let dir_rel = row
+            .dir_path
+            .clone()
+            .unwrap_or_else(|| episode_dir_rel(&row.anime_id, &row.episode_number));
+        let dir = self.root.join(&dir_rel);
+        let _ = std::fs::remove_dir_all(&dir);
+        // Prune the parent (anime) dir when empty.
+        if let Some(parent) = dir.parent() {
+            if parent != self.root {
+                let _ = std::fs::remove_dir(parent);
+            }
+        }
+        let _ = self.db.delete_download_row(row.id);
+        self.emit(DownloadEvent::State(StatePayload {
+            id: row.id,
+            anime_id: row.anime_id.clone(),
+            episode_number: row.episode_number.clone(),
+            state: row.state,
+            error: None,
+            removed: true,
+        }));
+    }
+
+    fn emit(&self, ev: DownloadEvent) {
+        let _ = self.events.send(ev);
+    }
+
+    fn emit_state(&self, row: &DownloadRow, error: Option<String>, removed: bool) {
+        self.emit(DownloadEvent::State(StatePayload {
+            id: row.id,
+            anime_id: row.anime_id.clone(),
+            episode_number: row.episode_number.clone(),
+            state: row.state,
+            error,
+            removed,
+        }));
+    }
+
+    fn emit_row_state(&self, id: i64, removed: bool) {
+        if let Ok(Some(row)) = self.db.get_download(id) {
+            let err = row.error.clone();
+            self.emit_state(&row, err, removed);
+        }
+    }
+
+    async fn scheduler(self: Arc<Self>) {
+        loop {
+            loop {
+                let active = self.db.count_downloading().unwrap_or(0) as usize;
+                if active >= MAX_ACTIVE_DOWNLOADS {
+                    break;
+                }
+                let Ok(Some(row)) = self.db.claim_next_queued() else { break };
+                let flag = Arc::new(AtomicU8::new(CTL_RUN));
+                self.controls.lock().unwrap().insert(row.id, flag.clone());
+                self.emit_state(&row, None, false);
+                let mgr = self.clone();
+                tokio::spawn(async move {
+                    mgr.run_job(row, flag).await;
+                    mgr.wake.notify_one();
+                });
+            }
+            // Wake on enqueue/resume/job-finish; the periodic tick is a safety
+            // net against a lost notify.
+            tokio::select! {
+                _ = self.wake.notified() => {}
+                _ = tokio::time::sleep(Duration::from_secs(15)) => {}
+            }
+        }
+    }
+
+    async fn run_job(&self, row: DownloadRow, flag: Arc<AtomicU8>) {
+        let outcome = self.execute(&row, &flag).await;
+        self.controls.lock().unwrap().remove(&row.id);
+        match outcome {
+            Ok(JobOutcome::Done) => {
+                let _ = self.db.set_download_state(row.id, DownloadState::Done, None);
+                self.emit_row_state(row.id, false);
+            }
+            Ok(JobOutcome::Paused) => {
+                let _ = self.db.set_download_state(row.id, DownloadState::Paused, None);
+                self.emit_row_state(row.id, false);
+            }
+            Ok(JobOutcome::Canceled) => {
+                if let Ok(Some(row)) = self.db.get_download(row.id) {
+                    self.delete_row_and_files(&row);
+                }
+            }
+            Err(e) => {
+                let _ = self
+                    .db
+                    .set_download_state(row.id, DownloadState::Failed, Some(&e.to_string()));
+                self.emit_row_state(row.id, false);
+            }
+        }
+    }
+
+    async fn execute(&self, row: &DownloadRow, flag: &AtomicU8) -> Result<JobOutcome> {
+        use crate::models::TranslationType;
+        let mode = if row.dub { TranslationType::Dub } else { TranslationType::Sub };
+        let desired = row.quality.as_deref().unwrap_or("best");
+
+        // Source URLs expire, so every (re)start re-resolves via the provider.
+        let sources = self
+            .provider
+            .sources(&row.anime_id, &row.episode_number, mode)
+            .await?;
+        let source = pick_source(&sources, desired)
+            .ok_or_else(|| Error::Download("no downloadable source found".into()))?
+            .clone();
+
+        let dir_rel = episode_dir_rel(&row.anime_id, &row.episode_number);
+        let dir = self.root.join(&dir_rel);
+        tokio::fs::create_dir_all(&dir).await?;
+        self.db
+            .set_download_meta(row.id, &dir_rel, source.kind, &source.quality)?;
+
+        // Subtitles first: cheap, idempotent, and present even if the video
+        // pauses midway.
+        let subs = self
+            .download_subtitles(&dir, &source.subtitles, source.referer.as_deref())
+            .await;
+
+        let mut tracker = Tracker::new(self, row);
+        let (outcome, video_file, quality_label) = match source.kind {
+            StreamKind::Mp4 => {
+                let out = self
+                    .run_mp4(&dir, &source, row, flag, &mut tracker)
+                    .await?;
+                (out, "video.mp4".to_string(), source.quality.clone())
+            }
+            StreamKind::Hls => {
+                let (out, label) = self
+                    .run_hls(&dir, &dir_rel, &source, row, desired, flag, &mut tracker)
+                    .await?;
+                (out, "index.m3u8".to_string(), label)
+            }
+        };
+
+        if matches!(outcome, JobOutcome::Done) {
+            let manifest = Manifest {
+                kind: source.kind,
+                quality: quality_label,
+                video: video_file,
+                subtitles: subs,
+            };
+            tokio::fs::write(
+                dir.join("manifest.json"),
+                serde_json::to_vec_pretty(&manifest).unwrap_or_default(),
+            )
+            .await?;
+            tracker.finish();
+        }
+        Ok(outcome)
+    }
+
+    /// Ranged MP4 download with byte-offset resume. The file length on disk is
+    /// the source of truth for the checkpoint.
+    async fn run_mp4(
+        &self,
+        dir: &Path,
+        source: &VideoSource,
+        row: &DownloadRow,
+        flag: &AtomicU8,
+        tracker: &mut Tracker<'_>,
+    ) -> Result<JobOutcome> {
+        let path = dir.join("video.mp4");
+        let mut offset: i64 = match tokio::fs::metadata(&path).await {
+            Ok(m) => m.len() as i64,
+            Err(_) => 0,
+        };
+
+        let range = if offset > 0 { Some(format!("bytes={offset}-")) } else { None };
+        let resp = self
+            .proxy
+            .get_ranged(&source.url, source.referer.as_deref(), range.as_deref())
+            .await?;
+        let status = resp.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(Error::Download(format!("upstream returned HTTP {status}")));
+        }
+
+        let mut total: Option<i64> = None;
+        if status == 206 {
+            // Content-Range: bytes a-b/total
+            if let Some(cr) = resp
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+            {
+                total = cr.rsplit('/').next().and_then(|t| t.parse().ok());
+            }
+        } else {
+            // Server ignored the Range (or fresh start): restart from zero.
+            if offset > 0 {
+                offset = 0;
+            }
+            total = resp.content_length().map(|l| l as i64);
+        }
+
+        let mut file = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&path)
+            .await?;
+        file.set_len(offset as u64).await?;
+        use tokio::io::AsyncSeekExt;
+        file.seek(std::io::SeekFrom::Start(offset as u64)).await?;
+
+        tracker.set(offset, total, 0, None);
+        let mut resp = resp;
+        loop {
+            match flag.load(Ordering::SeqCst) {
+                CTL_PAUSE => {
+                    file.flush().await?;
+                    tracker.persist_now();
+                    return Ok(JobOutcome::Paused);
+                }
+                CTL_CANCEL => return Ok(JobOutcome::Canceled),
+                _ => {}
+            }
+            let chunk = tokio::time::timeout(FETCH_TIMEOUT, resp.chunk())
+                .await
+                .map_err(|_| Error::Download("download stalled (timeout)".into()))??;
+            let Some(bytes) = chunk else { break };
+            file.write_all(&bytes).await?;
+            offset += bytes.len() as i64;
+            tracker.set(offset, total, 0, None);
+        }
+        file.flush().await?;
+        tracker.persist_now();
+
+        if let Some(t) = total {
+            if offset < t {
+                return Err(Error::Download(format!(
+                    "connection ended early ({offset}/{t} bytes) — resume to continue"
+                )));
+            }
+        }
+        Ok(JobOutcome::Done)
+    }
+
+    /// HLS download: resolve the variant, fetch segments concurrently in
+    /// batches, and write a localized playlist on completion. The number of
+    /// contiguous completed segments is the resume checkpoint.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_hls(
+        &self,
+        dir: &Path,
+        dir_rel: &str,
+        source: &VideoSource,
+        row: &DownloadRow,
+        desired: &str,
+        flag: &AtomicU8,
+        tracker: &mut Tracker<'_>,
+    ) -> Result<(JobOutcome, String)> {
+        let referer = source.referer.as_deref();
+        let fetched = self.proxy.fetch(&source.url, referer).await?;
+        let mut playlist = String::from_utf8_lossy(&fetched.bytes).into_owned();
+        let mut base_url = source.url.clone();
+        let mut quality_label = source.quality.clone();
+
+        let variants = hls::parse_variants(&playlist, &base_url);
+        if !variants.is_empty() {
+            let v = hls::pick_variant(&variants, desired)
+                .ok_or_else(|| Error::Download("empty master playlist".into()))?;
+            if v.height > 0 {
+                quality_label = v.height.to_string();
+            }
+            base_url = v.url.clone();
+            let vf = self.proxy.fetch(&base_url, referer).await?;
+            playlist = String::from_utf8_lossy(&vf.bytes).into_owned();
+        }
+        self.db
+            .set_download_meta(row.id, dir_rel, StreamKind::Hls, &quality_label)?;
+
+        let segments = hls::parse_segments(&playlist, &base_url);
+        if segments.is_empty() {
+            return Err(Error::Download("HLS playlist has no segments".into()));
+        }
+        let keys = hls::parse_uri_attrs(&playlist, &base_url);
+        let total = segments.len() as i64;
+
+        // Resume checkpoint: valid only if the segment count still matches
+        // (a re-resolve can land on a different variant/host).
+        let mut done = row.segments_done;
+        if row.segments_total != Some(total) || done > total {
+            done = 0;
+        }
+        let mut bytes_done = if done > 0 { row.bytes_done } else { 0 };
+
+        // Local names for playlist localization.
+        let mut map: HashMap<String, String> = HashMap::new();
+        for (i, url) in segments.iter().enumerate() {
+            map.entry(url.clone())
+                .or_insert_with(|| format!("seg_{i:05}.{}", seg_ext(url)));
+        }
+        for (i, url) in keys.iter().enumerate() {
+            map.entry(url.clone()).or_insert_with(|| format!("key_{i:02}.bin"));
+        }
+
+        // Keys/init sections are small: always (re)download them.
+        for url in &keys {
+            let data = self.fetch_with_timeout(url, referer).await?;
+            tokio::fs::write(dir.join(&map[url]), &data).await?;
+        }
+
+        tracker.set(bytes_done, None, done, Some(total));
+        while done < total {
+            match flag.load(Ordering::SeqCst) {
+                CTL_PAUSE => {
+                    tracker.persist_now();
+                    return Ok((JobOutcome::Paused, quality_label));
+                }
+                CTL_CANCEL => return Ok((JobOutcome::Canceled, quality_label)),
+                _ => {}
+            }
+            let end = (done as usize + SEGMENT_CONCURRENCY).min(total as usize);
+            let batch: Vec<usize> = (done as usize..end).collect();
+            let fetches = batch.iter().map(|&i| {
+                let url = segments[i].clone();
+                async move {
+                    let data = self.fetch_with_timeout(&url, referer).await?;
+                    Ok::<(usize, Vec<u8>), Error>((i, data))
+                }
+            });
+            let results = futures_util::future::join_all(fetches).await;
+            for res in results {
+                let (i, data) = res?;
+                bytes_done += data.len() as i64;
+                tokio::fs::write(dir.join(&map[&segments[i]]), &data).await?;
+            }
+            done = end as i64;
+            tracker.set(bytes_done, None, done, Some(total));
+        }
+
+        // All segments on disk: write the localized playlist.
+        let local = hls::localize_playlist(&playlist, &base_url, &map);
+        tokio::fs::write(dir.join("index.m3u8"), local).await?;
+        tracker.set(bytes_done, Some(bytes_done), total, Some(total));
+        tracker.persist_now();
+        Ok((JobOutcome::Done, quality_label))
+    }
+
+    async fn fetch_with_timeout(&self, url: &str, referer: Option<&str>) -> Result<Vec<u8>> {
+        let fetched = tokio::time::timeout(FETCH_TIMEOUT, self.proxy.fetch(url, referer))
+            .await
+            .map_err(|_| Error::Download(format!("fetch timed out: {url}")))??;
+        Ok(fetched.bytes)
+    }
+
+    /// Download the source's subtitle tracks into the episode dir as VTT.
+    /// Best-effort: unparseable/unfetchable tracks are skipped.
+    async fn download_subtitles(
+        &self,
+        dir: &Path,
+        subs: &[SubtitleTrack],
+        referer: Option<&str>,
+    ) -> Vec<ManifestSub> {
+        let mut out = Vec::new();
+        for (i, sub) in subs.iter().enumerate() {
+            let Ok(bytes) = self.fetch_with_timeout(&sub.url, referer).await else {
+                continue;
+            };
+            let text = String::from_utf8_lossy(&bytes);
+            let vtt = if text.trim_start().starts_with("WEBVTT") {
+                text.into_owned()
+            } else {
+                let ext = sub
+                    .url
+                    .split(['?', '#'])
+                    .next()
+                    .and_then(|p| p.rsplit('.').next())
+                    .unwrap_or("srt");
+                match crate::subs::to_vtt(&text, ext) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                }
+            };
+            let file = format!("sub_{i:02}_{}.vtt", sanitize_component(&sub.lang));
+            if tokio::fs::write(dir.join(&file), vtt).await.is_ok() {
+                out.push(ManifestSub {
+                    label: sub.label.clone(),
+                    lang: sub.lang.clone(),
+                    file,
+                });
+            }
+        }
+        out
+    }
+}
+
+/// File extension for a local segment file (playback doesn't strictly need it,
+/// but keeping fMP4 segments as .m4s is tidier).
+fn seg_ext(url: &str) -> &'static str {
+    let path = url.split(['?', '#']).next().unwrap_or(url).to_ascii_lowercase();
+    if path.ends_with(".m4s") {
+        "m4s"
+    } else if path.ends_with(".mp4") {
+        "mp4"
+    } else if path.ends_with(".aac") {
+        "aac"
+    } else {
+        "ts"
+    }
+}
+
+/// Throttled progress persistence + event emission (~2/s) with speed math.
+struct Tracker<'a> {
+    mgr: &'a DownloadManager,
+    id: i64,
+    anime_id: String,
+    episode_number: String,
+    bytes_done: i64,
+    bytes_total: Option<i64>,
+    segments_done: i64,
+    segments_total: Option<i64>,
+    last_tick: Instant,
+    last_bytes: i64,
+}
+
+impl<'a> Tracker<'a> {
+    fn new(mgr: &'a DownloadManager, row: &DownloadRow) -> Self {
+        Self {
+            mgr,
+            id: row.id,
+            anime_id: row.anime_id.clone(),
+            episode_number: row.episode_number.clone(),
+            bytes_done: row.bytes_done,
+            bytes_total: row.bytes_total,
+            segments_done: row.segments_done,
+            segments_total: row.segments_total,
+            last_tick: Instant::now(),
+            last_bytes: row.bytes_done,
+        }
+    }
+
+    fn set(
+        &mut self,
+        bytes_done: i64,
+        bytes_total: Option<i64>,
+        segments_done: i64,
+        segments_total: Option<i64>,
+    ) {
+        self.bytes_done = bytes_done;
+        if bytes_total.is_some() {
+            self.bytes_total = bytes_total;
+        }
+        self.segments_done = segments_done;
+        if segments_total.is_some() {
+            self.segments_total = segments_total;
+        }
+        if self.last_tick.elapsed() >= PROGRESS_INTERVAL {
+            self.persist_now();
+        }
+    }
+
+    /// Persist the checkpoint and emit a progress event immediately.
+    fn persist_now(&mut self) {
+        let dt = self.last_tick.elapsed().as_secs_f64().max(0.001);
+        let speed = (self.bytes_done - self.last_bytes).max(0) as f64 / dt;
+        self.last_tick = Instant::now();
+        self.last_bytes = self.bytes_done;
+        let _ = self.mgr.db.update_download_progress(
+            self.id,
+            self.bytes_done,
+            self.bytes_total,
+            self.segments_done,
+            self.segments_total,
+        );
+        self.mgr.emit(DownloadEvent::Progress(ProgressPayload {
+            id: self.id,
+            anime_id: self.anime_id.clone(),
+            episode_number: self.episode_number.clone(),
+            bytes_done: self.bytes_done,
+            bytes_total: self.bytes_total,
+            segments_done: self.segments_done,
+            segments_total: self.segments_total,
+            speed_bps: speed,
+        }));
+    }
+
+    fn finish(&mut self) {
+        if self.bytes_total.is_none() {
+            self.bytes_total = Some(self.bytes_done);
+        }
+        self.persist_now();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::StreamKind::*;
+
+    fn src(name: &str, quality: &str, url: &str, kind: crate::models::StreamKind) -> VideoSource {
+        VideoSource {
+            provider_name: name.into(),
+            quality: quality.into(),
+            url: url.into(),
+            kind,
+            referer: None,
+            subtitles: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn transitions_follow_the_state_machine() {
+        use DownloadState::*;
+        // Legal.
+        assert!(can_transition(Queued, Downloading));
+        assert!(can_transition(Queued, Paused));
+        assert!(can_transition(Downloading, Done));
+        assert!(can_transition(Downloading, Failed));
+        assert!(can_transition(Downloading, Paused));
+        assert!(can_transition(Downloading, Queued)); // startup recovery
+        assert!(can_transition(Paused, Queued));
+        assert!(can_transition(Failed, Queued));
+        // Illegal.
+        assert!(!can_transition(Done, Queued));
+        assert!(!can_transition(Done, Downloading));
+        assert!(!can_transition(Queued, Done));
+        assert!(!can_transition(Paused, Done));
+        assert!(!can_transition(Paused, Downloading)); // must re-queue first
+        assert!(!can_transition(Failed, Downloading));
+    }
+
+    #[test]
+    fn pick_source_prefers_exact_quality_then_direct() {
+        let sources = vec![
+            src("a", "1080", "https://cdn/a.mp4", Mp4),
+            src("b", "720", "https://cdn/b.mp4", Mp4),
+            src("c", "auto", "https://cdn/c.m3u8", Hls),
+            src("embed", "1080", "https://ok.ru/videoembed/1", Mp4),
+        ];
+        assert_eq!(pick_source(&sources, "720").unwrap().provider_name, "b");
+        assert_eq!(pick_source(&sources, "1080").unwrap().provider_name, "a");
+        // "best" picks the highest numeric quality.
+        assert_eq!(pick_source(&sources, "best").unwrap().provider_name, "a");
+        // Embed pages are never downloadable.
+        let only_embed = vec![src("embed", "1080", "https://ok.ru/videoembed/1", Mp4)];
+        assert!(pick_source(&only_embed, "best").is_none());
+    }
+
+    #[test]
+    fn pick_source_hls_master_adapts_to_any_quality() {
+        let sources = vec![
+            src("mp4", "480", "https://cdn/a.mp4", Mp4),
+            src("hls", "hls-multi", "https://cdn/master.m3u8", Hls),
+        ];
+        // The master can serve 1080 via its variants; the 480 mp4 cannot.
+        assert_eq!(pick_source(&sources, "1080").unwrap().provider_name, "hls");
+        // But an exact numeric match still wins.
+        assert_eq!(pick_source(&sources, "480").unwrap().provider_name, "mp4");
+    }
+
+    #[test]
+    fn sanitize_and_episode_dir() {
+        assert_eq!(sanitize_component("abc123"), "abc123");
+        assert_eq!(sanitize_component("5.5"), "5.5");
+        assert_eq!(sanitize_component("a/b\\c:d"), "a_b_c_d");
+        assert_eq!(sanitize_component(".."), "_");
+        assert_eq!(sanitize_component(""), "_");
+        assert_eq!(episode_dir_rel("show1", "5.5"), "show1/5.5");
+        assert_eq!(episode_dir_rel("../evil", "1"), ".._evil/1");
+    }
+
+    #[test]
+    fn quality_num_parses_labels() {
+        assert_eq!(quality_num("1080"), Some(1080));
+        assert_eq!(quality_num("720p"), Some(720));
+        assert_eq!(quality_num("best"), None);
+        assert_eq!(quality_num("hls-multi"), None);
+    }
+
+    #[test]
+    fn manifest_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("anidoku-manifest-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("show/1")).unwrap();
+        let m = Manifest {
+            kind: Hls,
+            quality: "1080".into(),
+            video: "index.m3u8".into(),
+            subtitles: vec![ManifestSub {
+                label: "English".into(),
+                lang: "en".into(),
+                file: "sub_00_en.vtt".into(),
+            }],
+        };
+        std::fs::write(
+            dir.join("show/1/manifest.json"),
+            serde_json::to_vec(&m).unwrap(),
+        )
+        .unwrap();
+        let read = read_manifest(&dir, "show/1").unwrap();
+        assert_eq!(read.video, "index.m3u8");
+        assert_eq!(read.subtitles.len(), 1);
+        assert!(read_manifest(&dir, "show/2").is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}

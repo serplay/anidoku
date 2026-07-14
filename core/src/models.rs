@@ -73,6 +73,94 @@ pub struct SubtitleTrack {
     pub url: String,
 }
 
+impl StreamKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StreamKind::Hls => "hls",
+            StreamKind::Mp4 => "mp4",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "hls" => Some(StreamKind::Hls),
+            "mp4" => Some(StreamKind::Mp4),
+            _ => None,
+        }
+    }
+}
+
+/// Lifecycle state of a download job (the `downloads.state` column).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DownloadState {
+    Queued,
+    Downloading,
+    Paused,
+    Done,
+    Failed,
+}
+
+impl DownloadState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DownloadState::Queued => "queued",
+            DownloadState::Downloading => "downloading",
+            DownloadState::Paused => "paused",
+            DownloadState::Done => "done",
+            DownloadState::Failed => "failed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "queued" => DownloadState::Queued,
+            "downloading" => DownloadState::Downloading,
+            "paused" => DownloadState::Paused,
+            "done" => DownloadState::Done,
+            "failed" => DownloadState::Failed,
+            _ => return None,
+        })
+    }
+}
+
+/// One `downloads` row: a persistent, resumable download job.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DownloadRow {
+    pub id: i64,
+    pub anime_id: String,
+    pub episode_number: String,
+    pub state: DownloadState,
+    /// Requested quality preference ("best", "1080", ...).
+    pub quality: Option<String>,
+    pub dub: bool,
+    /// Resolved stream kind, known once the download has started.
+    pub kind: Option<StreamKind>,
+    pub bytes_total: Option<i64>,
+    pub bytes_done: i64,
+    /// HLS resume checkpoint: number of contiguous segments fully written.
+    pub segments_done: i64,
+    pub segments_total: Option<i64>,
+    /// Episode directory, relative to the downloads root ("<anime>/<ep>").
+    pub dir_path: Option<String>,
+    pub error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    /// Show title joined from the anime cache (listing queries only).
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+/// Storage accounting for the download manager: completed bytes per show.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AnimeStorage {
+    pub anime_id: String,
+    pub title: Option<String>,
+    pub cover_url: Option<String>,
+    pub episodes: i64,
+    pub bytes: i64,
+}
+
 /// AniList media-list status. Serialized as AniList's SCREAMING enum values so
 /// the same strings round-trip through the DB `list_entries.status` CHECK and
 /// the GraphQL `SaveMediaListEntry` mutation.

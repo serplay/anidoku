@@ -1,3 +1,4 @@
+mod downloads;
 mod migrations;
 
 use crate::models::{LibraryItem, ListEntry, MediaListStatus, WatchState};

@@ -7,6 +7,7 @@
 
 pub mod anilist;
 pub mod db;
+pub mod downloads;
 pub mod error;
 pub mod media_server;
 pub mod models;

@@ -95,6 +95,14 @@ const MIGRATIONS: &[&str] = &[
         cached_at     INTEGER NOT NULL DEFAULT (unixepoch())
     );
     ",
+    // 004: download-engine columns. `dub` selects the translation type when the
+    // job re-resolves its source; `kind`/`segments_total` are resolved at start
+    // and drive resume checkpoints + progress math.
+    "
+    ALTER TABLE downloads ADD COLUMN dub INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE downloads ADD COLUMN kind TEXT;
+    ALTER TABLE downloads ADD COLUMN segments_total INTEGER;
+    ",
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

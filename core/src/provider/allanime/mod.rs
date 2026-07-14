@@ -121,7 +121,7 @@ impl AllAnime {
 ///   0 — looks like a direct media file / known direct CDN
 ///   1 — unknown (could be either)
 ///   2 — looks like an HTML embed page (ok.ru, mp4upload, /e/…, …)
-fn playability_rank(s: &crate::models::VideoSource) -> u8 {
+pub fn playability_rank(s: &crate::models::VideoSource) -> u8 {
     let url = s.url.to_ascii_lowercase();
     let path = url.split(['?', '#']).next().unwrap_or(&url);
 

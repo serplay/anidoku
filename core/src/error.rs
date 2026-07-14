@@ -20,6 +20,9 @@ pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
+    #[error("download error: {0}")]
+    Download(String),
+
     #[error("anilist error: {0}")]
     AniList(String),
 
