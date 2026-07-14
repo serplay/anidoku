@@ -76,7 +76,8 @@
 	--space-section: 80px;
 
 	/* Focus ring */
-	--focus-ring: 0 0 0 2px rgba(59, 130, 246, 0.5);
+	/* Neutral keyboard-focus ring (no blue). */
+	--focus-ring: 0 0 0 2px rgba(146, 154, 165, 0.35);
 }
 
 *,
@@ -113,4 +114,10 @@ a {
 :focus-visible {
 	outline: none;
 	box-shadow: var(--focus-ring);
+}
+
+/* Text fields mark focus via their container (caret + surface lift), not a ring. */
+input:focus-visible,
+textarea:focus-visible {
+	box-shadow: none;
 }
