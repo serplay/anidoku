@@ -138,7 +138,12 @@ pub async fn drain(app: &AppHandle) {
                     .fail_mutation(m.id, now() + backoff_secs(m.attempts + 1) as i64);
                 return;
             }
-            Err(_) => {
+            Err(e) => {
+                eprintln!(
+                    "sync: SaveMediaListEntry failed for anilist_id {} (attempt {}): {e}",
+                    m.anilist_id,
+                    m.attempts + 1
+                );
                 let _ = state
                     .db
                     .fail_mutation(m.id, now() + backoff_secs(m.attempts + 1) as i64);

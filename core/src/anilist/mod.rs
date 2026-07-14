@@ -71,6 +71,22 @@ pub struct SaveEntry {
     pub score: Option<f64>,
 }
 
+/// Variables for `SaveMediaListEntry`. A missing score must be OMITTED, not
+/// sent as `null` — AniList's validation rejects `"score": null` with
+/// "The score must be a number." (an unprovided nullable GraphQL variable
+/// makes the argument behave as if it were not passed at all).
+fn save_variables(e: &SaveEntry) -> Value {
+    let mut vars = json!({
+        "mediaId": e.media_id,
+        "status": e.status.as_str(),
+        "progress": e.progress,
+    });
+    if let Some(s) = e.score {
+        vars["score"] = json!(s);
+    }
+    vars
+}
+
 pub struct AniListClient {
     client: Client,
 }
@@ -174,13 +190,9 @@ impl AniListClient {
 
     /// Push one entry. Returns AniList's post-save `updatedAt` (unix seconds).
     pub async fn save_media_list_entry(&self, token: &str, e: &SaveEntry) -> Result<i64> {
-        let vars = json!({
-            "mediaId": e.media_id,
-            "status": e.status.as_str(),
-            "progress": e.progress,
-            "score": e.score,
-        });
-        let v = self.post(Some(token), SAVE_MUTATION, vars).await?;
+        let v = self
+            .post(Some(token), SAVE_MUTATION, save_variables(e))
+            .await?;
         parse_save_response(&v)
     }
 
@@ -199,5 +211,37 @@ impl AniListClient {
             Some(m) if !m.is_null() => Ok(Some(parse::parse_media_obj(m))),
             _ => Ok(None),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn save_variables_omits_missing_score() {
+        // Regression: AniList rejects "score": null with a 400 validation
+        // error ("The score must be a number"), so None must mean absent.
+        let vars = save_variables(&SaveEntry {
+            media_id: 189046,
+            status: MediaListStatus::Current,
+            progress: 11,
+            score: None,
+        });
+        assert!(vars.get("score").is_none());
+        assert_eq!(vars["mediaId"], 189046);
+        assert_eq!(vars["status"], "CURRENT");
+        assert_eq!(vars["progress"], 11);
+    }
+
+    #[test]
+    fn save_variables_includes_present_score() {
+        let vars = save_variables(&SaveEntry {
+            media_id: 1,
+            status: MediaListStatus::Completed,
+            progress: 12,
+            score: Some(8.5),
+        });
+        assert_eq!(vars["score"], 8.5);
     }
 }
