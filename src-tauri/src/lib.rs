@@ -9,58 +9,85 @@ mod sync;
 
 use anidoku_core::anilist::AniListClient;
 use anidoku_core::db::Database;
+use anidoku_core::downloads::{DownloadEvent, DownloadManager};
 use anidoku_core::media_server;
 use anidoku_core::provider::allanime::AllAnime;
 use anidoku_core::proxy::ProxyClient;
 use auth::AuthStore;
+use std::path::PathBuf;
 use std::sync::Arc;
+use tauri::Emitter;
 
 /// Shared application state, injected into every command.
 pub struct AppState {
-    pub provider: AllAnime,
-    pub db: Database,
+    pub provider: Arc<AllAnime>,
+    pub db: Arc<Database>,
     pub proxy: Arc<ProxyClient>,
     /// Base URL of the loopback media server, e.g. `http://127.0.0.1:52123`.
     /// The UI fetches this once and routes all playback (MP4/HLS/subtitles)
-    /// through it so Range/Referer are handled correctly.
+    /// through it so Range/Referer are handled correctly. Downloaded episodes
+    /// are served under `<media_base>/dl/<anime>/<ep>/...`.
     pub media_base: String,
     /// AniList GraphQL client (M2 sync).
     pub anilist: AniListClient,
     /// OAuth token + client-id storage (app-data file, 0600).
     pub auth: AuthStore,
+    /// Offline download engine (M3).
+    pub downloads: Arc<DownloadManager>,
+    /// Root of the downloads tree (app-data `downloads/`).
+    pub downloads_root: PathBuf,
 }
 
 impl AppState {
-    fn new() -> Self {
+    fn new(download_events: tokio::sync::mpsc::UnboundedSender<DownloadEvent>) -> Self {
         let data_dir = dirs::data_dir()
             .unwrap_or_else(std::env::temp_dir)
             .join("AniDoku");
         let db_path = data_dir.join("anidoku.db");
-        let db = Database::open(&db_path).expect("open database");
+        let db = Arc::new(Database::open(&db_path).expect("open database"));
         let proxy = Arc::new(ProxyClient::new());
         let auth = AuthStore::load(&data_dir);
+        let provider = Arc::new(AllAnime::new());
+        let downloads_root = data_dir.join("downloads");
+        std::fs::create_dir_all(&downloads_root).expect("create downloads dir");
 
         // Start the loopback media server before the webview loads. Tauri's
-        // async runtime is Tokio, so we can block on the bind here.
-        let media = tauri::async_runtime::block_on(media_server::spawn(proxy.clone()))
-            .expect("start media server");
+        // async runtime is Tokio, so we can block on the bind here. It also
+        // serves the downloads tree under /dl/ for offline playback.
+        let media = tauri::async_runtime::block_on(media_server::spawn(
+            proxy.clone(),
+            Some(downloads_root.clone()),
+        ))
+        .expect("start media server");
         eprintln!("media server listening on {}", media.base);
 
+        let downloads = DownloadManager::new(
+            db.clone(),
+            proxy.clone(),
+            provider.clone(),
+            downloads_root.clone(),
+            download_events,
+        );
+
         AppState {
-            provider: AllAnime::new(),
+            provider,
             db,
             proxy,
             media_base: media.base,
             anilist: AniListClient::new(),
             auth,
+            downloads,
+            downloads_root,
         }
     }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let state = AppState::new();
+    let (dl_tx, mut dl_rx) = tokio::sync::mpsc::unbounded_channel::<DownloadEvent>();
+    let state = AppState::new(dl_tx);
     let proxy = state.proxy.clone();
+    let downloads = state.downloads.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -70,10 +97,27 @@ pub fn run() {
         .register_asynchronous_uri_scheme_protocol("stream", move |_ctx, request, responder| {
             stream::handle(proxy.clone(), request, responder);
         })
-        .setup(|app| {
+        .setup(move |app| {
             // Background AniList sync worker: startup pull + periodic drain/pull.
             // No-ops while logged out, so it is always safe to spawn.
             sync::spawn_worker(app.handle().clone());
+
+            // Download engine: recover in-flight rows, start the scheduler,
+            // and forward engine events to the UI (same pattern as sync.rs).
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                downloads.start();
+                while let Some(ev) = dl_rx.recv().await {
+                    match ev {
+                        DownloadEvent::Progress(p) => {
+                            let _ = handle.emit("download:progress", p);
+                        }
+                        DownloadEvent::State(s) => {
+                            let _ = handle.emit("download:state", s);
+                        }
+                    }
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -96,7 +140,17 @@ pub fn run() {
             commands::get_anime_list_state,
             commands::search_anilist,
             commands::set_anime_mapping,
+            commands::enqueue_downloads,
+            commands::list_downloads,
+            commands::downloads_for_anime,
+            commands::pause_download,
+            commands::resume_download,
+            commands::cancel_download,
+            commands::delete_anime_downloads,
+            commands::delete_completed_downloads,
+            commands::download_storage,
+            commands::get_offline_info,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running AniDoku");
+        .expect("error while running AniDoku")
 }

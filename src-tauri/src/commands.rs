@@ -2,9 +2,10 @@
 //! core crate; all real logic lives in `anidoku-core`.
 
 use crate::{auth, AppState};
+use anidoku_core::downloads as downloads_core;
 use anidoku_core::models::{
-    AnimeSummary, LibraryItem, ListEntry, MediaInfo, MediaListStatus, TranslationType, VideoSource,
-    Viewer, WatchState,
+    AnimeStorage, AnimeSummary, DownloadRow, DownloadState, LibraryItem, ListEntry, MediaInfo,
+    MediaListStatus, StreamKind, TranslationType, VideoSource, Viewer, WatchState,
 };
 use anidoku_core::provider::Provider;
 use anidoku_core::sync::best_match;
@@ -369,4 +370,129 @@ async fn resolve_mapping(
         m.format.as_deref(),
     );
     Some(m.anilist_id)
+}
+
+// ---------------------------------------------------------------------------
+// Downloads (M3)
+// ---------------------------------------------------------------------------
+
+/// Enqueue one or more episodes of a show (single / range / all). Returns how
+/// many were actually enqueued (episodes already downloaded/queued skip).
+#[tauri::command]
+pub fn enqueue_downloads(
+    state: State<'_, AppState>,
+    anime_id: String,
+    episodes: Vec<String>,
+    quality: Option<String>,
+    dub: bool,
+) -> CmdResult<u32> {
+    let mut n = 0;
+    for ep in &episodes {
+        if state
+            .downloads
+            .enqueue(&anime_id, ep, quality.as_deref(), dub)
+            .map_err(map_err)?
+            .is_some()
+        {
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+#[tauri::command]
+pub fn list_downloads(state: State<'_, AppState>) -> CmdResult<Vec<DownloadRow>> {
+    state.db.list_downloads().map_err(map_err)
+}
+
+#[tauri::command]
+pub fn downloads_for_anime(
+    state: State<'_, AppState>,
+    anime_id: String,
+) -> CmdResult<Vec<DownloadRow>> {
+    state.db.downloads_for_anime(&anime_id).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn pause_download(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
+    state.downloads.pause(id).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn resume_download(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
+    state.downloads.resume(id).map_err(map_err)
+}
+
+/// Cancel an active/queued download, or delete a completed/failed one.
+/// Removes the row and any files on disk.
+#[tauri::command]
+pub fn cancel_download(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
+    state.downloads.remove(id).map_err(map_err)
+}
+
+/// Delete all completed downloads of one show. Returns how many were removed.
+#[tauri::command]
+pub fn delete_anime_downloads(state: State<'_, AppState>, anime_id: String) -> CmdResult<usize> {
+    state.downloads.remove_anime_completed(&anime_id).map_err(map_err)
+}
+
+/// Bulk cleanup: delete every completed download. Returns how many.
+#[tauri::command]
+pub fn delete_completed_downloads(state: State<'_, AppState>) -> CmdResult<usize> {
+    state.downloads.remove_all_completed().map_err(map_err)
+}
+
+#[derive(Serialize)]
+pub struct DownloadStorage {
+    pub per_anime: Vec<AnimeStorage>,
+    pub total_bytes: i64,
+}
+
+#[tauri::command]
+pub fn download_storage(state: State<'_, AppState>) -> CmdResult<DownloadStorage> {
+    Ok(DownloadStorage {
+        per_anime: state.db.download_storage().map_err(map_err)?,
+        total_bytes: state.db.download_total_bytes().map_err(map_err)?,
+    })
+}
+
+/// Offline playback info for one episode: present only when a completed
+/// download (with its manifest) exists. The UI builds player URLs as
+/// `<media_base>/dl/<dir>/<file>`.
+#[derive(Serialize)]
+pub struct OfflineInfo {
+    pub dir: String,
+    pub kind: StreamKind,
+    pub quality: String,
+    pub video: String,
+    pub subtitles: Vec<downloads_core::ManifestSub>,
+}
+
+#[tauri::command]
+pub fn get_offline_info(
+    state: State<'_, AppState>,
+    anime_id: String,
+    episode: String,
+) -> CmdResult<Option<OfflineInfo>> {
+    let Some(row) = state
+        .db
+        .download_for_episode(&anime_id, &episode)
+        .map_err(map_err)?
+    else {
+        return Ok(None);
+    };
+    if row.state != DownloadState::Done {
+        return Ok(None);
+    }
+    let Some(dir) = row.dir_path else { return Ok(None) };
+    let Some(manifest) = downloads_core::read_manifest(&state.downloads_root, &dir) else {
+        return Ok(None);
+    };
+    Ok(Some(OfflineInfo {
+        dir,
+        kind: manifest.kind,
+        quality: manifest.quality,
+        video: manifest.video,
+        subtitles: manifest.subtitles,
+    }))
 }
