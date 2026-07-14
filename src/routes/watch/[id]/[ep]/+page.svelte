@@ -183,6 +183,9 @@
 		if (e.key === 'f' || e.key === 'F') {
 			e.preventDefault();
 			void toggleFullscreen();
+		} else if (e.key === ' ') {
+			e.preventDefault();
+			if (video) video.paused ? void video.play() : video.pause();
 		} else if (e.key === 'ArrowRight') {
 			e.preventDefault();
 			seekBy(5);
@@ -291,7 +294,7 @@
 		<div class="group">
 			<span class="label">Player</span>
 			<Button variant="secondary" onclick={() => void toggleFullscreen()}>⛶ Fullscreen</Button>
-			<span class="hint">F fullscreen · ← / → skip 5s</span>
+			<span class="hint">Space play/pause · F fullscreen · ← / → skip 5s</span>
 		</div>
 	</div>
 {/if}
