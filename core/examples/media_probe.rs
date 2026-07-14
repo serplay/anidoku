@@ -31,7 +31,7 @@ async fn main() {
     };
 
     let proxy = Arc::new(ProxyClient::new());
-    let handle = media_server::spawn(proxy).await.expect("spawn media server");
+    let handle = media_server::spawn(proxy, None).await.expect("spawn media server");
     let media_url = media_server::make_media_url(&handle.base, &url, referer.as_deref());
 
     println!("MEDIA_BASE={}", handle.base);

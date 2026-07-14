@@ -483,7 +483,7 @@ impl DownloadManager {
         &self,
         dir: &Path,
         source: &VideoSource,
-        row: &DownloadRow,
+        _row: &DownloadRow,
         flag: &AtomicU8,
         tracker: &mut Tracker<'_>,
     ) -> Result<JobOutcome> {
