@@ -139,12 +139,14 @@
 		};
 	});
 
+	// Icon paths (24×24 stroke) power the mobile bottom tab bar; the desktop
+	// top nav renders labels only.
 	const nav = [
-		{ href: '/', label: 'Home' },
-		{ href: '/search', label: 'Search' },
-		{ href: '/library', label: 'Library' },
-		{ href: '/downloads', label: 'Downloads' },
-		{ href: '/settings', label: 'Settings' }
+		{ href: '/', label: 'Home', icon: 'M3 10.5 12 3l9 7.5M5.5 8.5V21h13V8.5' },
+		{ href: '/search', label: 'Search', icon: 'M10.5 17a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13Zm10.5 4-5.6-5.6' },
+		{ href: '/library', label: 'Library', icon: 'M4 4h4v16H4zM10 4h4v16h-4zM16 5.5l4-.9 3.4 15-4 .9z' },
+		{ href: '/downloads', label: 'Downloads', icon: 'M12 3v10m0 0-4-4m4 4 4-4M5 19h14' },
+		{ href: '/settings', label: 'Settings', icon: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm7.5-3a7.5 7.5 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7.6 7.6 0 0 0-2-1.2L14.6 3h-4l-.4 2.6a7.6 7.6 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6a7.6 7.6 0 0 0 0 2.4l-2 1.6 2 3.4 2.4-1a7.6 7.6 0 0 0 2 1.2l.4 2.6h4l.4-2.6a7.6 7.6 0 0 0 2-1.2l2.4 1 2-3.4-2-1.6c.1-.4.1-.8.1-1.2Z' }
 	];
 
 	function active(href: string): boolean {
@@ -195,15 +197,38 @@
 			<span>{authState.viewer.name}</span>
 		</a>
 	{:else if authState.expired}
-		<a class="signin expired" href="/settings">Session expired — sign in</a>
+		<a class="signin expired" href="/settings">
+			<span class="full">Session expired — sign in</span><span class="short">Sign in</span>
+		</a>
 	{:else}
-		<a class="signin" href="/settings">Sign in to AniList</a>
+		<a class="signin" href="/settings">
+			<span class="full">Sign in to AniList</span><span class="short">Sign in</span>
+		</a>
 	{/if}
 </header>
 
 <main>
 	{@render children()}
 </main>
+
+<!-- Mobile bottom tab bar (< 768px); the top nav hides at the same breakpoint. -->
+<nav class="tabbar" aria-label="Primary">
+	{#each nav as item (item.href)}
+		<a href={item.href} class:active={active(item.href)}>
+			<svg viewBox="0 0 24 24" aria-hidden="true">
+				<path
+					d={item.icon}
+					fill="none"
+					stroke="currentColor"
+					stroke-width="1.8"
+					stroke-linecap="round"
+					stroke-linejoin="round"
+				/>
+			</svg>
+			<span>{item.label}</span>
+		</a>
+	{/each}
+</nav>
 
 {#if showSplash}
 	<div class="splash" class:fading={splashFading} aria-hidden="true">
@@ -319,6 +344,9 @@
 	.signin.expired {
 		color: var(--color-down);
 	}
+	.signin .short {
+		display: none;
+	}
 	main {
 		max-width: 1280px;
 		margin: 0 auto;
@@ -386,6 +414,78 @@
 	@media (prefers-reduced-motion: reduce) {
 		.splash-logo {
 			animation: none;
+		}
+	}
+
+	/* Bottom tab bar — mobile only (DESIGN.md: top nav collapses < 768px). */
+	.tabbar {
+		display: none;
+	}
+	@media (max-width: 767px) {
+		.topnav {
+			height: 56px;
+			gap: var(--space-md);
+			padding: 0 var(--space-md);
+			/* Notch / status bar (viewport-fit=cover on Android/iOS). */
+			padding-top: env(safe-area-inset-top, 0px);
+			height: calc(56px + env(safe-area-inset-top, 0px));
+		}
+		.topnav > nav {
+			display: none;
+		}
+		.viewer span {
+			display: none;
+		}
+		.viewer {
+			padding: 4px;
+		}
+		.signin .full {
+			display: none;
+		}
+		.signin .short {
+			display: inline;
+		}
+		.tabbar {
+			position: fixed;
+			left: 0;
+			right: 0;
+			bottom: 0;
+			z-index: 50;
+			display: flex;
+			background: var(--color-canvas);
+			border-top: 1px solid var(--color-hairline);
+			padding-bottom: env(safe-area-inset-bottom, 0px);
+		}
+		.tabbar a {
+			flex: 1;
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			gap: 2px;
+			padding: 8px 0 6px;
+			color: var(--color-muted-strong);
+			font: var(--text-caption);
+		}
+		.tabbar a.active {
+			color: var(--color-primary);
+		}
+		.tabbar svg {
+			width: 22px;
+			height: 22px;
+		}
+		main {
+			padding: var(--space-md);
+			/* Clear the fixed tab bar. */
+			padding-bottom: calc(64px + env(safe-area-inset-bottom, 0px));
+		}
+		.toasts {
+			left: var(--space-md);
+			right: var(--space-md);
+			bottom: calc(64px + env(safe-area-inset-bottom, 0px) + var(--space-sm));
+			align-items: stretch;
+		}
+		.toast {
+			max-width: none;
 		}
 	}
 </style>

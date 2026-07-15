@@ -259,4 +259,9 @@
 	.hint code {
 		color: var(--color-primary);
 	}
+	@media (max-width: 767px) {
+		h1 {
+			font: var(--text-title-lg);
+		}
+	}
 </style>

@@ -717,4 +717,21 @@
 		justify-content: center;
 		margin-top: var(--space-xl);
 	}
+	@media (max-width: 767px) {
+		h1 {
+			font: var(--text-title-lg);
+		}
+		.controls {
+			flex-wrap: wrap;
+			gap: var(--space-sm);
+		}
+		/* Input takes the full first row; Dub + Search share the second. */
+		.grow {
+			flex: 1 1 100%;
+		}
+		.grid {
+			grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+			gap: var(--space-md);
+		}
+	}
 </style>

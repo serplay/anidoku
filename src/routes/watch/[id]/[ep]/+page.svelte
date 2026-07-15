@@ -567,6 +567,21 @@
 		gap: var(--space-sm);
 		margin-top: var(--space-lg);
 	}
+	@media (max-width: 767px) {
+		h1 {
+			font: var(--text-title-md);
+		}
+		.controls {
+			gap: var(--space-md);
+		}
+		.row {
+			flex-wrap: wrap;
+		}
+		/* Keyboard shortcuts don't exist on touch. */
+		.hint {
+			display: none;
+		}
+	}
 	.error {
 		color: var(--color-down);
 		margin-top: var(--space-md);

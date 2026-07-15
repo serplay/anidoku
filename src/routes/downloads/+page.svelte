@@ -567,4 +567,25 @@
 	.error {
 		color: var(--color-down);
 	}
+	@media (max-width: 767px) {
+		h1 {
+			font: var(--text-title-lg);
+		}
+		/* Actions drop below the progress block instead of squeezing the title. */
+		.job {
+			flex-wrap: wrap;
+		}
+		.jmain {
+			flex: 1 1 100%;
+		}
+		.jactions {
+			margin-left: auto;
+		}
+		.ghead {
+			flex-wrap: wrap;
+		}
+		.err {
+			max-width: 100%;
+		}
+	}
 </style>

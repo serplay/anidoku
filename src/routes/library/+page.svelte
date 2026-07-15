@@ -317,4 +317,16 @@
 	a {
 		color: var(--color-primary);
 	}
+	@media (max-width: 767px) {
+		h1 {
+			font: var(--text-title-lg);
+		}
+		/* Status + stepper wrap under the title instead of crushing it. */
+		.entry {
+			flex-wrap: wrap;
+		}
+		.body {
+			flex: 1 1 160px;
+		}
+	}
 </style>

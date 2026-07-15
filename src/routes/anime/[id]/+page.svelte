@@ -818,6 +818,21 @@
 		border-radius: var(--radius-xl);
 		overflow: hidden;
 	}
+	@media (max-width: 767px) {
+		.hero {
+			gap: var(--space-md);
+		}
+		.cover {
+			width: 110px;
+		}
+		.info h1 {
+			font: var(--text-title-lg);
+		}
+		.desc.clamped {
+			-webkit-line-clamp: 3;
+			line-clamp: 3;
+		}
+	}
 	.status {
 		color: var(--color-muted);
 	}

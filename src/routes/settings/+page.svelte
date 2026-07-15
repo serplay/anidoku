@@ -335,4 +335,19 @@
 	a {
 		color: var(--color-primary);
 	}
+	@media (max-width: 767px) {
+		h1 {
+			font: var(--text-title-lg);
+		}
+		.signed-in {
+			flex-wrap: wrap;
+		}
+		.row {
+			flex-wrap: wrap;
+			gap: var(--space-sm);
+		}
+		.redirect {
+			word-break: break-all;
+		}
+	}
 </style>
