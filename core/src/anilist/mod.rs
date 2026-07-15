@@ -159,6 +159,7 @@ fn save_variables(e: &SaveEntry) -> Value {
     vars
 }
 
+#[derive(Clone)]
 pub struct AniListClient {
     client: Client,
 }

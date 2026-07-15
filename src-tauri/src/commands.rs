@@ -269,7 +269,33 @@ pub fn set_list_entry(
         .set_list_entry_local(anilist_id, status, progress, score)
         .map_err(map_err)?;
     crate::sync::push_local(&state, &app, &entry);
+    // An entry created in-app may have no media_cache row yet, which leaves
+    // "AniList #id" placeholders on home/library cards. Warm it best-effort.
+    warm_media_cache(&state, anilist_id);
     Ok(entry)
+}
+
+/// Backfill `media_cache` (title/cover/…) for an AniList id in the background
+/// when it's missing. Best-effort: failures just leave the placeholder until
+/// the next sync pull warms the row.
+fn warm_media_cache(state: &AppState, anilist_id: i64) {
+    if !state.db.media_title_missing(anilist_id).unwrap_or(false) {
+        return;
+    }
+    let anilist = state.anilist.clone();
+    let db = state.db.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Ok(Some(m)) = anilist.media_by_id(anilist_id).await {
+            let _ = db.upsert_media(
+                anilist_id,
+                m.title_romaji.as_deref(),
+                m.title_english.as_deref(),
+                m.cover_url.as_deref(),
+                m.episode_count,
+                m.format.as_deref(),
+            );
+        }
+    });
 }
 
 #[derive(Serialize)]
@@ -659,7 +685,17 @@ pub async fn refresh_home(state: State<'_, AppState>) -> CmdResult<HomePayload> 
 /// media metadata, provider mapping, and last watch activity. Works offline.
 #[tauri::command]
 pub fn get_continue_watching(state: State<'_, AppState>) -> CmdResult<Vec<ContinueWatchingItem>> {
-    state.db.continue_watching().map_err(map_err)
+    let rows = state.db.continue_watching().map_err(map_err)?;
+    // Self-heal rows whose media_cache never got warmed (entries added before
+    // the set_list_entry backfill existed): fetch metadata in the background
+    // so the next render shows the real title/cover instead of "AniList #id".
+    for r in rows
+        .iter()
+        .filter(|r| r.title_romaji.is_none() && r.title_english.is_none())
+    {
+        warm_media_cache(&state, r.anilist_id);
+    }
+    Ok(rows)
 }
 
 /// Resolve an AniList id to a provider show for deep-linking (home card /

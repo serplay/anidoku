@@ -242,6 +242,21 @@ impl Database {
         Ok(())
     }
 
+    /// True when `media_cache` has no title for this id — a card rendered from
+    /// it would fall back to an "AniList #id" placeholder.
+    pub fn media_title_missing(&self, anilist_id: i64) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let known: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM media_cache WHERE anilist_id = ?1
+                 AND (title_romaji IS NOT NULL OR title_english IS NOT NULL)",
+                params![anilist_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(known.is_none())
+    }
+
     pub fn media_episode_count(&self, anilist_id: i64) -> Result<Option<i64>> {
         let conn = self.conn.lock().unwrap();
         let row = conn
