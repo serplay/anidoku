@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0B505F154F59120B61CACD57 /* DownloadBackgroundTask.swift in Sources */ = {isa = PBXBuildFile; fileRef = E22689C4B34CCE6BA2811B47 /* DownloadBackgroundTask.swift */; };
 		0E681C3721F14BF2DF6D59A3 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CA8B63485824E13B7AEFAD85 /* UIKit.framework */; };
 		268F30E15C9BE78885D8E7AE /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 88954570C31AE563C6C9B05F /* CoreGraphics.framework */; };
 		37C02FEE2E562692DEBBC8DC /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C8A8B98952C6A9D8AAF4C68B /* QuartzCore.framework */; };
@@ -43,9 +44,11 @@
 		D7D03495C11AD85D2DFA16B5 /* airing.rs */ = {isa = PBXFileReference; path = airing.rs; sourceTree = "<group>"; };
 		DB40B95EAE49528C113FDEBC /* android.rs */ = {isa = PBXFileReference; path = android.rs; sourceTree = "<group>"; };
 		DF0940A040EA10F76E45D5DF /* main.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = main.mm; sourceTree = "<group>"; };
+		E22689C4B34CCE6BA2811B47 /* DownloadBackgroundTask.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadBackgroundTask.swift; sourceTree = "<group>"; };
 		EDFEABD099DAD061FFCB4BBA /* MetalKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = MetalKit.framework; path = System/Library/Frameworks/MetalKit.framework; sourceTree = SDKROOT; };
 		F11D82ED949325C2B1586B3B /* WebKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WebKit.framework; path = System/Library/Frameworks/WebKit.framework; sourceTree = SDKROOT; };
 		FA5F573D25CC4EAE28BFF2B2 /* Metal.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Metal.framework; path = System/Library/Frameworks/Metal.framework; sourceTree = SDKROOT; };
+		FE3CAC0F89EF71A1DE86D168 /* ios.rs */ = {isa = PBXFileReference; path = ios.rs; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -100,6 +103,7 @@
 		40A5B851301069EB16B41AD0 /* anidoku */ = {
 			isa = PBXGroup;
 			children = (
+				E22689C4B34CCE6BA2811B47 /* DownloadBackgroundTask.swift */,
 				DF0940A040EA10F76E45D5DF /* main.mm */,
 				ECAB2948A08F8071A97D3B13 /* bindings */,
 			);
@@ -153,6 +157,7 @@
 				DB40B95EAE49528C113FDEBC /* android.rs */,
 				7168AC225E6069245C8DA0CB /* auth.rs */,
 				15D8A639E9B164385635343D /* commands.rs */,
+				FE3CAC0F89EF71A1DE86D168 /* ios.rs */,
 				7D7A085F8A8E50CBFEBA4977 /* lib.rs */,
 				59C480726D7E5F1090913C3E /* main.rs */,
 				A169690BE936D609E4888731 /* stream.rs */,
@@ -160,6 +165,20 @@
 			);
 			name = src;
 			path = ../../src;
+			sourceTree = "<group>";
+		};
+		"TEMP_139BE430-D482-47BE-8C67-063AB440E46C" /* arm64 */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = arm64;
+			sourceTree = "<group>";
+		};
+		"TEMP_A418532F-F619-40EF-9622-161710B926D0" /* x86_64 */ = {
+			isa = PBXGroup;
+			children = (
+			);
+			path = x86_64;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -257,6 +276,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				0B505F154F59120B61CACD57 /* DownloadBackgroundTask.swift in Sources */,
 				ADD9C8D81C369D86F4B5F11D /* main.mm in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -344,7 +364,7 @@
 				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
 				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
 				PRODUCT_BUNDLE_IDENTIFIER = com.anidoku.app;
-				PRODUCT_NAME = AniDoku;
+				PRODUCT_NAME = "AniDoku";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALID_ARCHS = arm64;
@@ -438,7 +458,7 @@
 				"LIBRARY_SEARCH_PATHS[arch=arm64]" = "$(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
 				"LIBRARY_SEARCH_PATHS[arch=x86_64]" = "$(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/$(PLATFORM_NAME) $(DEVELOPER_DIR)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift-5.0/$(PLATFORM_NAME)";
 				PRODUCT_BUNDLE_IDENTIFIER = com.anidoku.app;
-				PRODUCT_NAME = AniDoku;
+				PRODUCT_NAME = "AniDoku";
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALID_ARCHS = arm64;

@@ -1,5 +1,55 @@
 # Plan
 
+## M5 — iOS (2026-07-16)
+
+Scaffolded and **simulator-verified** (iPhone 16 Pro, iOS 26.5); build recipe
+in BUILD-IOS.md. Toolchain present: Xcode 26.6, iOS rust targets, CocoaPods,
+XcodeGen, iOS simulators installed.
+
+Done:
+
+- `tauri ios init` → XcodeGen project committed under `src-tauri/gen/apple`.
+- **Native-HLS playback**: already implemented — the player feature-detects
+  `video.canPlayType('application/vnd.apple.mpegurl')` and bypasses hls.js
+  (no UA sniffing). This is the *same* path macOS WKWebView already uses, so
+  it is continuously exercised on desktop. Quality/source switching is
+  independent of hls.js (each quality is a separate source URL); provider +
+  external `<track>` subtitles attach to the native player. No change needed.
+- **Background download shim**: `DownloadBackgroundTask.swift` (`@_cdecl`
+  `anidoku_set_download_active`) holds a `UIApplication` background task while
+  downloads are active; toggled from `src-tauri/src/ios.rs` on the same
+  queued/downloading-crosses-zero trigger as Android's foreground service.
+  Linked via the standard Tauri Rust↔Swift pattern (cdylib link gets
+  `-undefined dynamic_lookup` in build.rs; the app links the staticlib where
+  the Swift symbol resolves).
+- **ATS / cleartext**: `NSAllowsLocalNetworking` in Info.plist + project.yml so
+  WKWebView can load the loopback media server / HLS proxy / OAuth capture
+  (iOS analogue of Android's network_security_config).
+- `stream://` custom scheme works natively in WKWebView (no localhost rewrite,
+  unlike Android) — `streamUrl` already only rewrites for Android.
+- BUILD-IOS.md written (simulator loop + AltStore/free-provisioning sideload +
+  signing story).
+
+Verified on the iOS Simulator: full debug build compiles + links (Rust core for
+`aarch64-apple-ios-sim` on rustls, Swift shim, app archive), installs, and
+launches; the webview UI renders (proving the ATS loopback exemption works for
+the app shell).
+
+Remaining for M5 sign-off (needs hardware/credentials this machine lacks):
+
+1. **Device sideload + signing**: this Mac has **no code-signing identity** and
+   no Apple Developer team, so device install / IPA export could not be run.
+   Needs the user to sign into Xcode with an Apple ID (see BUILD-IOS.md).
+2. **On-device background-download behaviour**: the background-task shim links
+   and is wired, but the Simulator does not model real background suspension,
+   so its actual effect (and iOS's short grace window vs. Android's unbounded
+   foreground service) is unverified on a device. Honest limitation documented:
+   truly unbounded background downloads would need a native background
+   `URLSession` rewrite of the engine — not attempted in M5.
+3. **On-device native-HLS streaming smoke test**: playback path is the macOS
+   code path and builds for iOS, but an end-to-end stream on a real device is
+   untested (simulator streaming not driven here).
+
 ## M4 — Android (in progress, near complete; 2026-07-15)
 
 Done and verified on the Pixel_8 emulator (Android 16, arm64) — see
