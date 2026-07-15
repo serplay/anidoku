@@ -431,3 +431,147 @@ export function downloadFraction(d: {
 		return Math.min(1, d.segments_done / d.segments_total);
 	return 0;
 }
+
+// ---------------------------------------------------------------------------
+// Home page + airing tracker & notification inbox (M3.5)
+// ---------------------------------------------------------------------------
+
+export interface HomeMedia {
+	anilist_id: number;
+	title_romaji: string | null;
+	title_english: string | null;
+	cover_url: string | null;
+	episode_count: number | null;
+	format: string | null;
+	status: string | null;
+	next_episode: number | null;
+	airing_at: number | null;
+}
+
+export interface HomeSections {
+	trending: HomeMedia[];
+	season: HomeMedia[];
+	next_season: HomeMedia[];
+}
+
+export interface HomePayload {
+	sections: HomeSections;
+	fetched_at: number;
+	fresh: boolean;
+}
+
+export interface ContinueWatchingItem {
+	anilist_id: number;
+	title_romaji: string | null;
+	title_english: string | null;
+	cover_url: string | null;
+	episode_count: number | null;
+	progress: number;
+	next_episode: string | null;
+	provider_id: string | null;
+	last_watched_at: number;
+}
+
+export interface Notification {
+	id: number;
+	anilist_id: number;
+	episode: number;
+	airing_at: number | null;
+	kind: string;
+	created_at: number;
+	read: boolean;
+	title_romaji: string | null;
+	title_english: string | null;
+	cover_url: string | null;
+	provider_id: string | null;
+}
+
+// Payload of the `notify:new` event.
+export interface NotifyNew {
+	anilist_id: number;
+	episode: number;
+	title: string | null;
+	unread: number;
+}
+
+export function getHomeCached(): Promise<HomePayload | null> {
+	return invoke('get_home_cached');
+}
+
+export function refreshHome(): Promise<HomePayload> {
+	return invoke('refresh_home');
+}
+
+export function getContinueWatching(): Promise<ContinueWatchingItem[]> {
+	return invoke('get_continue_watching');
+}
+
+// Resolve an AniList id to a provider show (existing mapping, else provider
+// search matched by carried aniListId / title). `null` → fall back to /search.
+export function resolveProviderForAnilist(
+	anilistId: number,
+	title: string,
+	episodes: number | null
+): Promise<AnimeSummary | null> {
+	return invoke('resolve_provider_for_anilist', { anilistId, title, episodes });
+}
+
+export function getNotifications(): Promise<Notification[]> {
+	return invoke('get_notifications');
+}
+
+export function getUpcoming(): Promise<Notification[]> {
+	return invoke('get_upcoming');
+}
+
+export function unreadNotifications(): Promise<number> {
+	return invoke('unread_notifications');
+}
+
+export function markNotificationsRead(): Promise<void> {
+	return invoke('mark_notifications_read');
+}
+
+export function clearNotifications(): Promise<void> {
+	return invoke('clear_notifications');
+}
+
+export function airingRefreshNow(): Promise<void> {
+	return invoke('airing_refresh_now');
+}
+
+export function getNotifyPlanning(): Promise<boolean> {
+	return invoke('get_notify_planning');
+}
+
+export function setNotifyPlanning(enabled: boolean): Promise<void> {
+	return invoke('set_notify_planning', { enabled });
+}
+
+// "Ep N in Xd" caption for airing shows: compact relative time until `at`.
+export function untilCaption(at: number, nowSecs = Math.floor(Date.now() / 1000)): string {
+	const d = at - nowSecs;
+	if (d <= 0) return 'now';
+	if (d < 3600) return `${Math.max(1, Math.round(d / 60))}m`;
+	if (d < 86400) return `${Math.round(d / 3600)}h`;
+	return `${Math.round(d / 86400)}d`;
+}
+
+// "Ep N airs <weekday, local date/time>" for the inbox Upcoming list.
+export function airsAtLabel(at: number): string {
+	return new Date(at * 1000).toLocaleString(undefined, {
+		weekday: 'short',
+		month: 'short',
+		day: 'numeric',
+		hour: 'numeric',
+		minute: '2-digit'
+	});
+}
+
+export function displayTitle(x: {
+	title_english: string | null;
+	title_romaji: string | null;
+	anilist_id: number;
+}): string {
+	return x.title_english ?? x.title_romaji ?? `AniList #${x.anilist_id}`;
+}

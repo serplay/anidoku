@@ -274,7 +274,7 @@
 	}
 </script>
 
-<a class="back" href="/">← Back to search</a>
+<a class="back" href="/search">← Back to search</a>
 
 <section class="hero">
 	<img

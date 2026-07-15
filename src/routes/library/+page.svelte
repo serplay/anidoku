@@ -78,7 +78,7 @@
 			goto(`/anime/${encodeURIComponent(i.provider_id)}?dub=0`);
 		} else {
 			// No provider mapping yet — search by title to find a stream source.
-			goto(`/?q=${encodeURIComponent(titleOf(i))}`);
+			goto(`/search?q=${encodeURIComponent(titleOf(i))}`);
 		}
 	}
 

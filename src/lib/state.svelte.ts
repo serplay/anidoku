@@ -69,3 +69,7 @@ export function pushToast(message: string, kind: Toast['kind'] = 'info') {
 		if (i >= 0) toasts.splice(i, 1);
 	}, 5000);
 }
+
+// Unread notification count for the nav bell badge, updated by the layout's
+// notify:new / notify:read listeners and the inbox page.
+export const notifyState = $state<{ unread: number }>({ unread: 0 });

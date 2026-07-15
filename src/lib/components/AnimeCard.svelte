@@ -6,14 +6,26 @@
 	interface Props {
 		anime: AnimeSummary;
 		onselect?: (a: AnimeSummary) => void;
+		/** Extra caption badge, e.g. "Ep 5 in 2d" on home airing cards. */
+		caption?: string | null;
+		/** Route the cover through the referer proxy (allanime thumbnails).
+		 *  Home rows use direct AniList covers and pass false. */
+		proxyCover?: boolean;
+		/** Hide the "N ep" badge (home rows where the count is unknown/0). */
+		showEpisodes?: boolean;
 	}
 
-	let { anime, onselect }: Props = $props();
+	let { anime, onselect, caption = null, proxyCover = true, showEpisodes = true }: Props =
+		$props();
 
-	// allanime thumbnails are also referer-gated; route them through the proxy
-	// so they load inside the webview.
+	// allanime thumbnails are referer-gated; route them through the proxy so
+	// they load inside the webview. AniList covers (home rows) load directly.
 	const cover = $derived(
-		anime.cover_url ? streamUrl(anime.cover_url, 'https://youtu-chan.com') : null
+		anime.cover_url
+			? proxyCover
+				? streamUrl(anime.cover_url, 'https://youtu-chan.com')
+				: anime.cover_url
+			: null
 	);
 	const display = $derived(anime.title_english ?? anime.title);
 </script>
@@ -26,7 +38,11 @@
 			loading="lazy"
 			onerror={(e) => ((e.currentTarget as HTMLImageElement).src = coverPlaceholder)}
 		/>
-		<span class="badge">{anime.available_episodes} ep</span>
+		{#if caption}
+			<span class="badge caption">{caption}</span>
+		{:else if showEpisodes && anime.available_episodes > 0}
+			<span class="badge">{anime.available_episodes} ep</span>
+		{/if}
 	</div>
 	<div class="meta">
 		<span class="title">{display}</span>
@@ -110,6 +126,9 @@
 		font: var(--text-caption);
 		padding: 2px 8px;
 		border-radius: var(--radius-sm);
+	}
+	.badge.caption {
+		color: var(--color-body);
 	}
 	.meta {
 		padding: 0 2px;

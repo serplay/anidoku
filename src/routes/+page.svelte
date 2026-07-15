@@ -1,145 +1,247 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
-	import { page } from '$app/state';
-	import { searchAnime, isDesktop, type AnimeSummary } from '$lib/api';
-	import { rememberAnime, searchState } from '$lib/state.svelte';
-	import SearchInput from '$lib/components/SearchInput.svelte';
-	import Button from '$lib/components/Button.svelte';
+	import {
+		getHomeCached,
+		refreshHome,
+		getContinueWatching,
+		resolveProviderForAnilist,
+		untilCaption,
+		displayTitle,
+		isDesktop,
+		type HomeSections,
+		type HomeMedia,
+		type ContinueWatchingItem,
+		type AnimeSummary
+	} from '$lib/api';
+	import { rememberAnime, pushToast } from '$lib/state.svelte';
+	import HomeRow from '$lib/components/HomeRow.svelte';
 	import AnimeCard from '$lib/components/AnimeCard.svelte';
-	import Skeleton from '$lib/components/Skeleton.svelte';
 
-	let query = $state(searchState.query);
-	let dub = $state(searchState.dub);
-	let loading = $state(false);
-	let error = $state<string | null>(null);
-	let results = $state<AnimeSummary[]>(searchState.results);
+	let sections = $state<HomeSections | null>(null);
+	let loading = $state(true);
+	let refreshing = $state(false);
+	let continueWatching = $state<ContinueWatchingItem[]>([]);
+	// AniList ids currently resolving to a provider show (click feedback).
+	let resolving = $state<Record<number, boolean>>({});
 
-	// A `?q=` param (e.g. from a Library entry with no stream source) pre-fills
-	// and runs the search once.
 	$effect(() => {
-		const q = page.url.searchParams.get('q');
-		if (q && q !== searchState.query) {
-			query = q;
-			void run();
-		}
+		void init();
 	});
 
-	async function run() {
-		const q = query.trim();
-		if (!q) return;
-		loading = true;
-		error = null;
+	async function init() {
+		if (!isDesktop()) {
+			loading = false;
+			return;
+		}
+		// Continue Watching is fully local: render immediately, works offline.
 		try {
-			results = await searchAnime(q, dub);
-			searchState.query = q;
-			searchState.results = results;
-			searchState.dub = dub;
+			continueWatching = await getContinueWatching();
+		} catch {
+			/* empty library */
+		}
+		// Home rows: render from cache instantly, refresh in background when
+		// stale (6h TTL) or missing.
+		try {
+			const cached = await getHomeCached();
+			if (cached) {
+				sections = cached.sections;
+				loading = false;
+				if (!cached.fresh) void refresh();
+			} else {
+				await refresh();
+			}
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
-			results = [];
+			pushToast(e instanceof Error ? e.message : String(e));
 		} finally {
 			loading = false;
 		}
 	}
 
-	function open(a: AnimeSummary) {
-		rememberAnime(a);
-		goto(`/anime/${encodeURIComponent(a.provider_id)}?dub=${dub ? 1 : 0}`);
+	async function refresh() {
+		refreshing = true;
+		try {
+			sections = (await refreshHome()).sections;
+		} catch {
+			// Offline / AniList down: cached (or empty) rows stay up.
+		} finally {
+			refreshing = false;
+		}
+	}
+
+	// HomeMedia → the AnimeSummary shape AnimeCard renders. provider_id is
+	// unknown until the click-time resolve.
+	function toSummary(m: HomeMedia): AnimeSummary {
+		return {
+			provider_id: `anilist:${m.anilist_id}`,
+			title: m.title_romaji ?? m.title_english ?? `AniList #${m.anilist_id}`,
+			title_english: m.title_english,
+			cover_url: m.cover_url,
+			available_episodes: m.episode_count ?? 0,
+			anilist_id: m.anilist_id
+		};
+	}
+
+	function cwSummary(i: ContinueWatchingItem): AnimeSummary {
+		return {
+			provider_id: i.provider_id ?? `anilist:${i.anilist_id}`,
+			title: i.title_romaji ?? displayTitle(i),
+			title_english: i.title_english,
+			cover_url: i.cover_url,
+			available_episodes: i.episode_count ?? 0,
+			anilist_id: i.anilist_id
+		};
+	}
+
+	function caption(m: HomeMedia): string | null {
+		if (m.next_episode && m.airing_at) {
+			return `Ep ${m.next_episode} in ${untilCaption(m.airing_at)}`;
+		}
+		return null;
+	}
+
+	function cwCaption(i: ContinueWatchingItem): string {
+		if (i.next_episode) return `Next: Ep ${i.next_episode}`;
+		return 'Caught up';
+	}
+
+	// Continue Watching click: deep-link straight to the next unwatched episode
+	// when a provider mapping exists; otherwise resolve like a home card.
+	async function openContinue(i: ContinueWatchingItem) {
+		if (i.provider_id) {
+			rememberAnime(cwSummary(i));
+			if (i.next_episode) {
+				goto(
+					`/watch/${encodeURIComponent(i.provider_id)}/${encodeURIComponent(i.next_episode)}?dub=0`
+				);
+			} else {
+				goto(`/anime/${encodeURIComponent(i.provider_id)}?dub=0`);
+			}
+			return;
+		}
+		await openAniList(i.anilist_id, displayTitle(i), i.episode_count);
+	}
+
+	// Home card click: AniList id → provider id (existing mapping, else
+	// provider search matched by carried aniListId) → detail page. Falls back
+	// to /search?q=title when unresolvable.
+	async function openMedia(m: HomeMedia) {
+		await openAniList(m.anilist_id, m.title_english ?? m.title_romaji ?? '', m.episode_count);
+	}
+
+	async function openAniList(anilistId: number, title: string, episodes: number | null) {
+		if (resolving[anilistId]) return;
+		resolving = { ...resolving, [anilistId]: true };
+		try {
+			const summary = await resolveProviderForAnilist(anilistId, title, episodes);
+			if (summary) {
+				rememberAnime(summary);
+				goto(`/anime/${encodeURIComponent(summary.provider_id)}?dub=0`);
+			} else {
+				pushToast('No stream source matched — showing search results');
+				goto(`/search?q=${encodeURIComponent(title)}`);
+			}
+		} catch (e) {
+			pushToast(e instanceof Error ? e.message : String(e));
+			goto(`/search?q=${encodeURIComponent(title)}`);
+		} finally {
+			const { [anilistId]: _done, ...rest } = resolving;
+			resolving = rest;
+		}
 	}
 </script>
 
-<section class="head">
-	<h1>Find something to watch</h1>
-	<div class="controls">
-		<div class="grow"><SearchInput bind:value={query} onsubmit={run} /></div>
-		<label class="dub">
-			<input type="checkbox" bind:checked={dub} /> Dub
-		</label>
-		<Button onclick={run} disabled={loading}>{loading ? 'Searching…' : 'Search'}</Button>
-	</div>
-	{#if !isDesktop()}
-		<p class="hint">
-			Running in a browser — search needs the desktop app: <code>npm run tauri dev</code>.
-		</p>
+<div class="head">
+	<h1>Home</h1>
+	{#if refreshing}<span class="refreshing">Updating…</span>{/if}
+</div>
+
+{#if !isDesktop()}
+	<p class="hint">
+		The home page needs the desktop app: <code>npm run tauri dev</code>.
+	</p>
+{:else}
+	{#if continueWatching.length > 0}
+		<HomeRow title="Continue Watching">
+			{#each continueWatching as i (i.anilist_id)}
+				<AnimeCard
+					anime={cwSummary(i)}
+					caption={cwCaption(i)}
+					proxyCover={false}
+					onselect={() => openContinue(i)}
+				/>
+			{/each}
+		</HomeRow>
 	{/if}
-</section>
 
-{#if error}
-	<p class="error">{error}</p>
-{/if}
+	<HomeRow
+		title="Trending Now"
+		loading={loading && !sections}
+		empty={sections && sections.trending.length === 0 ? 'Nothing to show — check back later.' : null}
+	>
+		{#each sections?.trending ?? [] as m (m.anilist_id)}
+			<AnimeCard
+				anime={toSummary(m)}
+				caption={caption(m)}
+				proxyCover={false}
+				onselect={() => openMedia(m)}
+			/>
+		{/each}
+	</HomeRow>
 
-{#if loading}
-	<div class="grid">
-		{#each Array(12), i (i)}
-			<div class="cardsk">
-				<Skeleton aspect="2 / 3" radius="var(--radius-lg)" />
-				<Skeleton width="85%" height="14px" />
-				<Skeleton width="55%" height="14px" />
-			</div>
+	<HomeRow
+		title="Popular This Season"
+		loading={loading && !sections}
+		empty={sections && sections.season.length === 0 ? 'Nothing to show — check back later.' : null}
+	>
+		{#each sections?.season ?? [] as m (m.anilist_id)}
+			<AnimeCard
+				anime={toSummary(m)}
+				caption={caption(m)}
+				proxyCover={false}
+				onselect={() => openMedia(m)}
+			/>
 		{/each}
-	</div>
-{:else if results.length > 0}
-	<div class="grid">
-		{#each results as a (a.provider_id)}
-			<AnimeCard anime={a} onselect={open} />
+	</HomeRow>
+
+	<HomeRow
+		title="Upcoming Next Season"
+		loading={loading && !sections}
+		empty={sections && sections.next_season.length === 0
+			? 'Nothing announced yet.'
+			: null}
+	>
+		{#each sections?.next_season ?? [] as m (m.anilist_id)}
+			<AnimeCard
+				anime={toSummary(m)}
+				caption={caption(m)}
+				proxyCover={false}
+				onselect={() => openMedia(m)}
+			/>
 		{/each}
-	</div>
-{:else if searchState.query}
-	<p class="empty">No results for “{searchState.query}”.</p>
+	</HomeRow>
 {/if}
 
 <style>
 	.head {
-		margin-bottom: var(--space-xl);
+		display: flex;
+		align-items: baseline;
+		gap: var(--space-md);
+		margin-bottom: var(--space-lg);
 	}
 	h1 {
 		font: var(--text-display-sm);
 		color: var(--color-on-dark);
-		margin: 0 0 var(--space-lg);
+		margin: 0;
 	}
-	.controls {
-		display: flex;
-		align-items: center;
-		gap: var(--space-md);
-	}
-	.grow {
-		flex: 1;
-	}
-	.dub {
-		display: flex;
-		align-items: center;
-		gap: var(--space-xxs);
-		font: var(--text-body-md);
-		color: var(--color-muted-strong);
-		cursor: pointer;
-		user-select: none;
-	}
-	.dub input {
-		accent-color: var(--color-primary);
+	.refreshing {
+		font: var(--text-caption);
+		color: var(--color-muted);
 	}
 	.hint {
 		font: var(--text-body-sm);
 		color: var(--color-muted);
-		margin-top: var(--space-sm);
 	}
 	.hint code {
 		color: var(--color-primary);
-	}
-	.error {
-		color: var(--color-down);
-		font: var(--text-body-md);
-	}
-	.empty {
-		color: var(--color-muted);
-	}
-	.grid {
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-		gap: var(--space-lg);
-	}
-	.cardsk {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-xs);
 	}
 </style>

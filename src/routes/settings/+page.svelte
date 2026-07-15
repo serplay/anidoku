@@ -6,6 +6,8 @@
 		anilistLogout,
 		anilistStatus,
 		anilistSyncNow,
+		getNotifyPlanning,
+		setNotifyPlanning,
 		isDesktop,
 		type Settings
 	} from '$lib/api';
@@ -17,6 +19,8 @@
 	let saving = $state(false);
 	let loggingIn = $state(false);
 	let error = $state<string | null>(null);
+	let notifyPlanning = $state(false);
+	let notifySaving = $state(false);
 
 	$effect(() => {
 		void init();
@@ -28,6 +32,7 @@
 			settings = await getSettings();
 			clientId = settings.client_id ?? '';
 			setAuthStatus(await anilistStatus());
+			notifyPlanning = await getNotifyPlanning();
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		}
@@ -79,6 +84,24 @@
 
 	function copyRedirect() {
 		if (settings) navigator.clipboard?.writeText(settings.redirect_url);
+	}
+
+	async function togglePlanning() {
+		notifySaving = true;
+		try {
+			await setNotifyPlanning(notifyPlanning);
+			pushToast(
+				notifyPlanning
+					? 'Planning shows will notify when episodes air.'
+					: 'Planning shows no longer tracked.',
+				'sync'
+			);
+		} catch (e) {
+			notifyPlanning = !notifyPlanning; // revert on failure
+			pushToast(e instanceof Error ? e.message : String(e));
+		} finally {
+			notifySaving = false;
+		}
 	}
 </script>
 
@@ -154,6 +177,23 @@
 	{#if error}
 		<p class="error">{error}</p>
 	{/if}
+</section>
+
+<section class="card notifications">
+	<h2>Notifications</h2>
+	<p class="hint">
+		Shows on your Watching list that are currently airing notify you when a new episode is out
+		(bell icon in the top bar + a system notification).
+	</p>
+	<label class="toggle">
+		<input
+			type="checkbox"
+			bind:checked={notifyPlanning}
+			onchange={togglePlanning}
+			disabled={notifySaving || !isDesktop()}
+		/>
+		Also notify for shows on my Planning list
+	</label>
 </section>
 
 <p class="note">
@@ -270,6 +310,21 @@
 		color: var(--color-down);
 		font: var(--text-body-md);
 		margin-top: var(--space-md);
+	}
+	.notifications {
+		margin-top: var(--space-lg);
+	}
+	.toggle {
+		display: flex;
+		align-items: center;
+		gap: var(--space-xs);
+		font: var(--text-body-md);
+		color: var(--color-body);
+		cursor: pointer;
+		user-select: none;
+	}
+	.toggle input {
+		accent-color: var(--color-primary);
 	}
 	.note {
 		max-width: 640px;

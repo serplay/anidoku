@@ -10,12 +10,14 @@
 	import {
 		anilistStatus,
 		anilistSyncNow,
+		unreadNotifications,
 		onEvent,
 		isDesktop,
 		type RemoteOverwrite,
-		type DownloadStateEvent
+		type DownloadStateEvent,
+		type NotifyNew
 	} from '$lib/api';
-	import { authState, setAuthStatus, toasts, pushToast } from '$lib/state.svelte';
+	import { authState, setAuthStatus, toasts, pushToast, notifyState } from '$lib/state.svelte';
 
 	let { children } = $props();
 
@@ -38,9 +40,25 @@
 	// throttled watch-state write past the threshold.
 	const unmappedSeen = new Set<string>();
 
+	async function refreshUnread() {
+		if (!isDesktop()) return;
+		try {
+			notifyState.unread = await unreadNotifications();
+		} catch {
+			/* browser / not ready */
+		}
+	}
+
 	$effect(() => {
 		refreshAuth();
+		refreshUnread();
 		const unlisteners = [
+			// Airing tracker: badge + toast when an episode releases.
+			onEvent<NotifyNew>('notify:new', (p) => {
+				notifyState.unread = p.unread;
+				pushToast(`New episode: Ep ${p.episode} of ${p.title ?? 'a tracked show'}`, 'sync');
+			}),
+			onEvent('notify:read', () => refreshUnread()),
 			onEvent<RemoteOverwrite>('sync:remote-overwrote', (p) => {
 				pushToast(`Synced from AniList: ${p.title ?? 'an entry'}`, 'sync');
 			}),
@@ -89,7 +107,8 @@
 	});
 
 	const nav = [
-		{ href: '/', label: 'Search' },
+		{ href: '/', label: 'Home' },
+		{ href: '/search', label: 'Search' },
 		{ href: '/library', label: 'Library' },
 		{ href: '/downloads', label: 'Downloads' },
 		{ href: '/settings', label: 'Settings' }
@@ -114,6 +133,27 @@
 		{/each}
 	</nav>
 	<div class="spacer"></div>
+	<a
+		class="bell"
+		href="/inbox"
+		class:active={active('/inbox')}
+		aria-label="Notification inbox{notifyState.unread > 0 ? ` (${notifyState.unread} unread)` : ''}"
+		title="Airing notifications"
+	>
+		<svg viewBox="0 0 24 24" aria-hidden="true">
+			<path
+				d="M18 8a6 6 0 1 0-12 0c0 7-3 8-3 8h18s-3-1-3-8m-4.7 11a2 2 0 0 1-3.4 0"
+				fill="none"
+				stroke="currentColor"
+				stroke-width="2"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+			/>
+		</svg>
+		{#if notifyState.unread > 0}
+			<span class="unread">{notifyState.unread > 99 ? '99+' : notifyState.unread}</span>
+		{/if}
+	</a>
 	{#if authState.viewer && authState.logged_in}
 		<a class="viewer" href="/settings" title="AniList: {authState.viewer.name}">
 			{#if authState.viewer.avatar_url}
@@ -180,6 +220,42 @@
 	}
 	.spacer {
 		flex: 1;
+	}
+	.bell {
+		position: relative;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: 36px;
+		height: 36px;
+		border-radius: var(--radius-md);
+		color: var(--color-muted-strong);
+	}
+	.bell:hover {
+		color: var(--color-on-dark);
+	}
+	.bell.active {
+		color: var(--color-on-dark);
+		background: var(--color-surface-card);
+	}
+	.bell svg {
+		width: 19px;
+		height: 19px;
+	}
+	.unread {
+		position: absolute;
+		top: 2px;
+		right: 0;
+		min-width: 16px;
+		height: 16px;
+		padding: 0 4px;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: var(--color-primary);
+		color: var(--color-on-primary);
+		font: 600 10px/1 var(--font-num);
+		border-radius: var(--radius-pill);
 	}
 	.viewer {
 		display: flex;
