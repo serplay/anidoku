@@ -1,3 +1,10 @@
+<script module lang="ts">
+	// Show the boot splash once per app launch. This module-level flag survives
+	// client-side navigation (the layout stays mounted, but this also guards
+	// against any remount), so the splash never re-appears after startup.
+	let splashDone = false;
+</script>
+
 <script lang="ts">
 	import '@fontsource/inter/400.css';
 	import '@fontsource/inter/500.css';
@@ -6,6 +13,7 @@
 	import '@fontsource/ibm-plex-sans/500.css';
 	import '$lib/styles/tokens.css';
 	import favicon from '$lib/assets/favicon.svg';
+	import splashLogo from '$lib/assets/splash-logo.png';
 	import { page } from '$app/state';
 	import {
 		anilistStatus,
@@ -20,6 +28,31 @@
 	import { authState, setAuthStatus, toasts, pushToast, notifyState } from '$lib/state.svelte';
 
 	let { children } = $props();
+
+	// Boot splash: full-viewport overlay on first launch, then fade + unmount.
+	// Home renders instantly from cache, so a fixed hold is simpler than
+	// readiness plumbing. Respects prefers-reduced-motion (skip the logo
+	// animation, shorten the hold + fade).
+	let showSplash = $state(!splashDone);
+	let splashFading = $state(false);
+
+	$effect(() => {
+		if (splashDone) return;
+		const reduce =
+			typeof window !== 'undefined' &&
+			window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+		const hold = reduce ? 300 : 1200;
+		const fade = reduce ? 150 : 300;
+		const t1 = setTimeout(() => (splashFading = true), hold);
+		const t2 = setTimeout(() => {
+			showSplash = false;
+			splashDone = true;
+		}, hold + fade);
+		return () => {
+			clearTimeout(t1);
+			clearTimeout(t2);
+		};
+	});
 
 	async function refreshAuth() {
 		if (!isDesktop()) return;
@@ -172,6 +205,12 @@
 	{@render children()}
 </main>
 
+{#if showSplash}
+	<div class="splash" class:fading={splashFading} aria-hidden="true">
+		<img class="splash-logo" src={splashLogo} alt="AniDoku" />
+	</div>
+{/if}
+
 {#if toasts.length > 0}
 	<div class="toasts">
 		{#each toasts as t (t.id)}
@@ -311,5 +350,42 @@
 	}
 	.toast.sync {
 		border-left-color: var(--color-primary);
+	}
+	/* Boot splash: dark canvas, centered logo. The single yellow accent lives in
+	   the logo itself — a deliberate brand moment (DESIGN.md). */
+	.splash {
+		position: fixed;
+		inset: 0;
+		z-index: 1000;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		background: var(--color-canvas);
+		opacity: 1;
+		transition: opacity 0.3s ease;
+	}
+	.splash.fading {
+		opacity: 0;
+	}
+	.splash-logo {
+		width: 160px;
+		height: 160px;
+		border-radius: var(--radius-xl);
+		animation: splash-in 0.9s cubic-bezier(0.2, 0.7, 0.2, 1) both;
+	}
+	@keyframes splash-in {
+		from {
+			opacity: 0;
+			transform: scale(0.82);
+		}
+		to {
+			opacity: 1;
+			transform: scale(1);
+		}
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.splash-logo {
+			animation: none;
+		}
 	}
 </style>
