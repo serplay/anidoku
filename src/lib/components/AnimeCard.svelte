@@ -54,9 +54,34 @@
 			: null
 	);
 	const display = $derived(anime.title_english ?? anime.title);
+
+	// Full-title dropdown tooltip. It renders position:fixed and is placed via
+	// JS on hover, so no scroll container (home rows are overflow:hidden on the
+	// y axis) can ever clip it. Falls back to above the card near the viewport
+	// bottom, and clamps to the right edge.
+	let cardEl = $state<HTMLButtonElement | null>(null);
+	let tipEl = $state<HTMLDivElement | null>(null);
+	let tipStyle = $state('visibility: hidden');
+
+	function placeTooltip() {
+		if (!cardEl || !tipEl) return;
+		const r = cardEl.getBoundingClientRect();
+		const h = tipEl.offsetHeight;
+		const w = tipEl.offsetWidth;
+		const top = r.bottom + 6 + h <= window.innerHeight ? r.bottom + 6 : r.top - h - 6;
+		const left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8));
+		tipStyle = `top:${top}px; left:${left}px; min-width:${r.width}px;`;
+	}
 </script>
 
-<button class="card" class:unavailable onclick={() => onselect?.(anime)}>
+<button
+	class="card"
+	class:unavailable
+	bind:this={cardEl}
+	onclick={() => onselect?.(anime)}
+	onmouseenter={placeTooltip}
+	onfocus={placeTooltip}
+>
 	<div class="cover">
 		<img
 			src={cover ?? coverPlaceholder}
@@ -72,15 +97,13 @@
 		{:else if showEpisodes && anime.available_episodes > 0}
 			<span class="badge">{anime.available_episodes} ep</span>
 		{/if}
-		<!-- Full-title tooltip: titles clamp to 2 lines, so long ones cut off.
-		     Anchored inside the cover (position:relative; overflow:hidden) so it
-		     can never escape the card and be clipped by a row's scroll container. -->
-		<div class="tooltip" role="tooltip">
-			<span class="t-main">{display}</span>
-			{#if anime.title !== display}
-				<span class="t-sub">{anime.title}</span>
-			{/if}
-		</div>
+	</div>
+	<!-- Full-title tooltip: titles clamp to 2 lines, so long ones cut off. -->
+	<div class="tooltip" role="tooltip" bind:this={tipEl} style={tipStyle}>
+		<span class="t-main">{display}</span>
+		{#if anime.title !== display}
+			<span class="t-sub">{anime.title}</span>
+		{/if}
 	</div>
 	<div class="meta">
 		<span class="title">{display}</span>
@@ -116,11 +139,10 @@
 		cursor: pointer;
 	}
 	.tooltip {
-		position: absolute;
-		left: 6px;
-		right: 6px;
-		bottom: 6px;
-		z-index: 20;
+		position: fixed;
+		width: max-content;
+		max-width: 280px;
+		z-index: 50;
 		display: flex;
 		flex-direction: column;
 		gap: 2px;
