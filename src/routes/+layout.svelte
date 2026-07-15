@@ -284,6 +284,10 @@
 		max-width: 1280px;
 		margin: 0 auto;
 		padding: var(--space-lg);
+		/* Backstop: the page body must never scroll horizontally (DESIGN.md).
+		   `clip` contains stray overflow without creating a scroll container the
+		   way `hidden` would. Real offenders are fixed at their source. */
+		overflow-x: clip;
 	}
 	.toasts {
 		position: fixed;

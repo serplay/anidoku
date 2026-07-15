@@ -478,6 +478,7 @@
 	}
 	.panel {
 		margin-top: var(--space-md);
+		max-width: 100%;
 		background: var(--color-surface-card);
 		border-radius: var(--radius-xl);
 		padding: var(--space-lg);
@@ -489,6 +490,7 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-xs);
+		min-width: 0;
 	}
 	.group.inline {
 		flex-direction: row;
@@ -499,7 +501,8 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--space-xs);
-		min-width: 140px;
+		flex: 1 1 140px;
+		min-width: 0;
 	}
 	.glabel {
 		font: var(--text-caption);
@@ -582,6 +585,7 @@
 		color: var(--color-muted);
 	}
 	.select {
+		max-width: 100%;
 		background: var(--color-surface-elevated);
 		border: 1px solid var(--color-hairline);
 		border-radius: var(--radius-md);
