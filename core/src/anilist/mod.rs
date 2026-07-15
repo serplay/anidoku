@@ -18,12 +18,15 @@ mod parse;
 pub mod season;
 
 pub use parse::{
-    parse_airing, parse_home_sections, parse_media_list_collection, parse_media_search,
-    parse_save_response, parse_viewer,
+    parse_airing, parse_catalog_search, parse_home_sections, parse_media_list_collection,
+    parse_media_search, parse_media_tags, parse_save_response, parse_viewer,
 };
 pub use season::{current_and_next_from_unix, Season};
 
-use crate::models::{AiringInfo, HomeSections, MediaInfo, MediaListStatus, RemoteListEntry, Viewer};
+use crate::models::{
+    AiringInfo, CatalogPage, HomeSections, MediaInfo, MediaListStatus, MediaTag, RemoteListEntry,
+    Viewer,
+};
 use crate::{Error, Result};
 use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
@@ -70,20 +73,58 @@ query ($id: Int) { Media(id: $id, type: ANIME) { \
 const HOME_QUERY: &str = "\
 query ($season: MediaSeason, $seasonYear: Int, $nextSeason: MediaSeason, $nextYear: Int, $perPage: Int) { \
   trending: Page(perPage: $perPage) { media(sort: TRENDING_DESC, type: ANIME, status: RELEASING) { \
-    id title { romaji english } coverImage { large } episodes format status \
+    id title { romaji english } coverImage { large } episodes format status seasonYear averageScore \
     nextAiringEpisode { episode airingAt } } } \
   season: Page(perPage: $perPage) { media(season: $season, seasonYear: $seasonYear, sort: POPULARITY_DESC, type: ANIME) { \
-    id title { romaji english } coverImage { large } episodes format status \
+    id title { romaji english } coverImage { large } episodes format status seasonYear averageScore \
     nextAiringEpisode { episode airingAt } } } \
   next: Page(perPage: $perPage) { media(season: $nextSeason, seasonYear: $nextYear, sort: POPULARITY_DESC, type: ANIME) { \
-    id title { romaji english } coverImage { large } episodes format status \
+    id title { romaji english } coverImage { large } episodes format status seasonYear averageScore \
     nextAiringEpisode { episode airingAt } } } \
 }";
+
+/// Reworked /search: AniList catalog search with filters. `isAdult` is passed
+/// false by default and omitted (null → unfiltered) only when the user opts into
+/// adult content (Hentai genre / adult tag). Verified live against
+/// graphql.anilist.co (2026-07).
+const SEARCH_CATALOG_QUERY: &str = "\
+query ($q: String, $page: Int, $perPage: Int, $genres: [String], $tags: [String], \
+       $seasonYear: Int, $status: [MediaStatus], $format: [MediaFormat], \
+       $sort: [MediaSort], $isAdult: Boolean) { \
+  Page(page: $page, perPage: $perPage) { \
+    pageInfo { currentPage hasNextPage } \
+    media(type: ANIME, search: $q, genre_in: $genres, tag_in: $tags, seasonYear: $seasonYear, \
+          status_in: $status, format_in: $format, sort: $sort, isAdult: $isAdult) { \
+      id title { romaji english } coverImage { large } format episodes averageScore \
+      seasonYear status genres nextAiringEpisode { episode } isAdult } \
+  } \
+}";
+
+/// The full tag list for the search filter picker. Cached with a long TTL.
+const TAG_COLLECTION_QUERY: &str = "query { MediaTagCollection { name category isAdult } }";
 
 /// Batched airing lookup for the tracker: one request, up to 50 ids/page.
 const AIRING_QUERY: &str = "\
 query ($ids: [Int]) { Page(perPage: 50) { media(id_in: $ids, type: ANIME) { \
   id status episodes nextAiringEpisode { episode airingAt } } } }";
+
+/// Filter set for the catalog search. Empty vecs / `None` mean "no constraint".
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct CatalogSearch {
+    pub query: String,
+    pub page: i64,
+    pub per_page: i64,
+    pub genres: Vec<String>,
+    pub tags: Vec<String>,
+    pub season_year: Option<i64>,
+    /// AniList `MediaStatus` values (RELEASING/FINISHED/CANCELLED/HIATUS).
+    pub status: Vec<String>,
+    /// AniList `MediaFormat` values (TV/TV_SHORT/MOVIE/SPECIAL/OVA/ONA/MUSIC).
+    pub format: Vec<String>,
+    /// When true, the `isAdult: false` restriction is dropped so adult results
+    /// (Hentai genre / adult tags) are included.
+    pub include_adult: bool,
+}
 
 /// Payload for a `SaveMediaListEntry` mutation. Serialized into `sync_queue`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -226,6 +267,55 @@ impl AniListClient {
             .post(None, SEARCH_QUERY, json!({ "search": query }))
             .await?;
         parse_media_search(&v)
+    }
+
+    /// Public (no-auth) catalog search for the reworked /search page. Empty
+    /// `query` with any filter still returns results (sorted by popularity).
+    pub async fn search_catalog(&self, params: &CatalogSearch) -> Result<CatalogPage> {
+        // SEARCH_MATCH ranks by text relevance; with no text it degrades to a
+        // near-random order, so fall back to POPULARITY_DESC when the box is empty.
+        let has_text = !params.query.trim().is_empty();
+        let sort = if has_text {
+            "SEARCH_MATCH"
+        } else {
+            "POPULARITY_DESC"
+        };
+        let mut vars = json!({
+            "page": params.page.max(1),
+            "perPage": params.per_page,
+            "sort": [sort],
+        });
+        if has_text {
+            vars["q"] = json!(params.query.trim());
+        }
+        if !params.genres.is_empty() {
+            vars["genres"] = json!(params.genres);
+        }
+        if !params.tags.is_empty() {
+            vars["tags"] = json!(params.tags);
+        }
+        if let Some(year) = params.season_year {
+            vars["seasonYear"] = json!(year);
+        }
+        if !params.status.is_empty() {
+            vars["status"] = json!(params.status);
+        }
+        if !params.format.is_empty() {
+            vars["format"] = json!(params.format);
+        }
+        // Gate adult content off by default; drop the restriction entirely
+        // (leaving the variable null) when the user opted in.
+        if !params.include_adult {
+            vars["isAdult"] = json!(false);
+        }
+        let v = self.post(None, SEARCH_CATALOG_QUERY, vars).await?;
+        parse_catalog_search(&v)
+    }
+
+    /// Public (no-auth) fetch of the full media-tag list for the filter picker.
+    pub async fn media_tags(&self) -> Result<Vec<MediaTag>> {
+        let v = self.post(None, TAG_COLLECTION_QUERY, json!({})).await?;
+        parse_media_tags(&v)
     }
 
     /// Fetch the three home sections in one public (no-auth) request. Compute

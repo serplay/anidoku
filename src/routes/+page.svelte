@@ -7,6 +7,7 @@
 		resolveProviderForAnilist,
 		untilCaption,
 		displayTitle,
+		homeMediaMeta,
 		isDesktop,
 		type HomeSections,
 		type HomeMedia,
@@ -182,6 +183,7 @@
 			<AnimeCard
 				anime={toSummary(m)}
 				caption={caption(m)}
+				meta={homeMediaMeta(m)}
 				proxyCover={false}
 				onselect={() => openMedia(m)}
 			/>
@@ -197,6 +199,7 @@
 			<AnimeCard
 				anime={toSummary(m)}
 				caption={caption(m)}
+				meta={homeMediaMeta(m)}
 				proxyCover={false}
 				onselect={() => openMedia(m)}
 			/>
@@ -214,6 +217,7 @@
 			<AnimeCard
 				anime={toSummary(m)}
 				caption={caption(m)}
+				meta={homeMediaMeta(m)}
 				proxyCover={false}
 				onselect={() => openMedia(m)}
 			/>

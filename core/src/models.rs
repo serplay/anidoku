@@ -288,6 +288,49 @@ pub struct HomeMedia {
     pub next_episode: Option<i64>,
     /// Unix seconds the next episode airs at (drives the "Ep N in Xd" caption).
     pub airing_at: Option<i64>,
+    /// Release year (startDate/seasonYear) for the card meta chip.
+    #[serde(default)]
+    pub season_year: Option<i64>,
+    /// Weighted mean score 0–100 for the card meta chip.
+    #[serde(default)]
+    pub average_score: Option<i64>,
+}
+
+/// A search result from the AniList catalog (the reworked /search). Carries
+/// everything AnimeCard's meta chips need plus `is_adult` for content gating.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CatalogMedia {
+    pub anilist_id: i64,
+    pub title_romaji: Option<String>,
+    pub title_english: Option<String>,
+    pub cover_url: Option<String>,
+    pub format: Option<String>,
+    pub episode_count: Option<i64>,
+    pub average_score: Option<i64>,
+    pub season_year: Option<i64>,
+    /// AniList media status ("RELEASING", "FINISHED", ...).
+    pub status: Option<String>,
+    pub genres: Vec<String>,
+    /// Next airing episode number, when the show is currently releasing.
+    pub next_episode: Option<i64>,
+    pub is_adult: bool,
+}
+
+/// One page of catalog search results plus pagination bookkeeping.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct CatalogPage {
+    pub media: Vec<CatalogMedia>,
+    pub has_next_page: bool,
+    pub current_page: i64,
+}
+
+/// One AniList media tag (from `MediaTagCollection`), cached with a long TTL for
+/// the search filter's type-to-filter tag picker.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MediaTag {
+    pub name: String,
+    pub category: Option<String>,
+    pub is_adult: bool,
 }
 
 /// The three AniList-sourced home sections, one batched fetch.

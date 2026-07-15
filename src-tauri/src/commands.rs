@@ -3,12 +3,12 @@
 
 use crate::{auth, AppState};
 use anidoku_core::airing::{is_fresh, HOME_TTL_SECS};
-use anidoku_core::anilist::current_and_next_from_unix;
+use anidoku_core::anilist::{current_and_next_from_unix, CatalogSearch};
 use anidoku_core::downloads as downloads_core;
 use anidoku_core::models::{
-    AnimeStorage, AnimeSummary, ContinueWatchingItem, DownloadRow, DownloadState,
-    HomeSections, LibraryItem, ListEntry, MediaInfo, MediaListStatus, Notification, StreamKind,
-    TranslationType, VideoSource, Viewer, WatchState,
+    AnimeStorage, AnimeSummary, CatalogPage, ContinueWatchingItem, DownloadRow, DownloadState,
+    HomeSections, LibraryItem, ListEntry, MediaInfo, MediaListStatus, MediaTag, Notification,
+    StreamKind, TranslationType, VideoSource, Viewer, WatchState,
 };
 use anidoku_core::provider::Provider;
 use anidoku_core::sync::{best_match, best_provider_match};
@@ -306,6 +306,71 @@ pub async fn get_anime_list_state(
 #[tauri::command]
 pub async fn search_anilist(state: State<'_, AppState>, query: String) -> CmdResult<Vec<MediaInfo>> {
     state.anilist.search_media(&query).await.map_err(map_err)
+}
+
+/// AniList catalog search for the reworked /search page. The provider handoff
+/// happens later at click time via `resolve_provider_for_anilist`.
+#[tauri::command]
+pub async fn search_catalog(
+    state: State<'_, AppState>,
+    filters: CatalogSearch,
+) -> CmdResult<CatalogPage> {
+    let mut f = filters;
+    if f.per_page <= 0 {
+        f.per_page = 30;
+    }
+    if f.page <= 0 {
+        f.page = 1;
+    }
+    state.anilist.search_catalog(&f).await.map_err(map_err)
+}
+
+const TAGS_CACHE_KEY: &str = "media_tags";
+const TAGS_FETCHED_KEY: &str = "media_tags_fetched_at";
+/// Tag list rarely changes; refresh at most weekly.
+const TAGS_TTL_SECS: i64 = 7 * 24 * 3600;
+
+/// The AniList media-tag list for the search filter picker. Served from the DB
+/// cache (long TTL); on a miss it fetches live and caches. When the cache is
+/// present but stale, the cached list is returned immediately and a background
+/// refresh is kicked off (kind to the rate limit).
+#[tauri::command]
+pub async fn get_media_tags(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Vec<MediaTag>> {
+    let cached = state.db.get_setting(TAGS_CACHE_KEY).map_err(map_err)?;
+    let fetched_at = state
+        .db
+        .get_setting(TAGS_FETCHED_KEY)
+        .map_err(map_err)?
+        .and_then(|s| s.parse::<i64>().ok())
+        .unwrap_or(0);
+
+    if let Some(json) = cached {
+        if let Ok(tags) = serde_json::from_str::<Vec<MediaTag>>(&json) {
+            if !is_fresh(fetched_at, now(), TAGS_TTL_SECS) {
+                // Stale: refresh in the background, serve the cached list now.
+                let app2 = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let _ = refresh_media_tags(&app2).await;
+                });
+            }
+            return Ok(tags);
+        }
+    }
+    // Cache miss (or corrupt): fetch live now.
+    refresh_media_tags(&app).await
+}
+
+/// Fetch the tag list live and cache it. Shared by the on-miss path and the
+/// background staleness refresh.
+async fn refresh_media_tags(app: &AppHandle) -> CmdResult<Vec<MediaTag>> {
+    use tauri::Manager;
+    let state = app.state::<AppState>();
+    let tags = state.anilist.media_tags().await.map_err(map_err)?;
+    if let Ok(json) = serde_json::to_string(&tags) {
+        let _ = state.db.set_setting(TAGS_CACHE_KEY, &json);
+        let _ = state.db.set_setting(TAGS_FETCHED_KEY, &now().to_string());
+    }
+    Ok(tags)
 }
 
 /// Manually pin a provider show to a specific AniList id (overrides matching).

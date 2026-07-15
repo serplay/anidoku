@@ -2,7 +2,7 @@
 // without a redundant provider round-trip. Backed by an in-memory rune plus
 // sessionStorage for reload survival.
 
-import type { AnimeSummary, AuthStatus } from '$lib/api';
+import type { AnimeSummary, AuthStatus, CatalogFilters, CatalogMedia } from '$lib/api';
 
 const KEY = 'anidoku:anime-cache';
 
@@ -33,6 +33,42 @@ export const searchState = $state<{ query: string; results: AnimeSummary[]; dub:
 	query: '',
 	results: [],
 	dub: false
+});
+
+// AniList catalog search state (reworked /search), cached in-memory so a
+// return navigation restores the results without re-fetching. The active
+// filters also live in the URL for back/forward, but the fetched result set
+// only lives here.
+export interface CatalogSearchState {
+	filters: CatalogFilters;
+	results: CatalogMedia[];
+	hasNext: boolean;
+	page: number;
+	dub: boolean;
+	ran: boolean;
+}
+
+export function emptyCatalogFilters(): CatalogFilters {
+	return {
+		query: '',
+		page: 1,
+		per_page: 30,
+		genres: [],
+		tags: [],
+		season_year: null,
+		status: [],
+		format: [],
+		include_adult: false
+	};
+}
+
+export const catalogState = $state<CatalogSearchState>({
+	filters: emptyCatalogFilters(),
+	results: [],
+	hasNext: false,
+	page: 1,
+	dub: false,
+	ran: false
 });
 
 // Shared AniList auth status, kept in sync across the nav, settings and library.

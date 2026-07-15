@@ -2,7 +2,8 @@
 //! function here is unit-tested against captured fixtures.
 
 use crate::models::{
-    AiringInfo, HomeMedia, HomeSections, MediaInfo, MediaListStatus, RemoteListEntry, Viewer,
+    AiringInfo, CatalogMedia, CatalogPage, HomeMedia, HomeSections, MediaInfo, MediaListStatus,
+    MediaTag, RemoteListEntry, Viewer,
 };
 use crate::{Error, Result};
 use serde_json::Value;
@@ -132,7 +133,83 @@ pub fn parse_home_media(m: &Value) -> HomeMedia {
         status: str_field(m, "status"),
         next_episode: airing.and_then(|a| a.get("episode")).and_then(Value::as_i64),
         airing_at: airing.and_then(|a| a.get("airingAt")).and_then(Value::as_i64),
+        season_year: m.get("seasonYear").and_then(Value::as_i64),
+        average_score: m.get("averageScore").and_then(Value::as_i64),
     }
+}
+
+/// Shred one catalog-search media object into `CatalogMedia`.
+pub fn parse_catalog_media(m: &Value) -> CatalogMedia {
+    let title = m.get("title");
+    let airing = m.get("nextAiringEpisode").filter(|a| !a.is_null());
+    let genres = m
+        .get("genres")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|g| g.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    CatalogMedia {
+        anilist_id: m.get("id").and_then(Value::as_i64).unwrap_or(0),
+        title_romaji: title.and_then(|t| str_field(t, "romaji")),
+        title_english: title.and_then(|t| str_field(t, "english")),
+        cover_url: m.get("coverImage").and_then(|c| str_field(c, "large")),
+        format: str_field(m, "format"),
+        episode_count: m.get("episodes").and_then(Value::as_i64),
+        average_score: m.get("averageScore").and_then(Value::as_i64),
+        season_year: m.get("seasonYear").and_then(Value::as_i64),
+        status: str_field(m, "status"),
+        genres,
+        next_episode: airing.and_then(|a| a.get("episode")).and_then(Value::as_i64),
+        is_adult: m.get("isAdult").and_then(Value::as_bool).unwrap_or(false),
+    }
+}
+
+/// Shred a `Page { pageInfo media }` catalog-search response.
+pub fn parse_catalog_search(v: &Value) -> Result<CatalogPage> {
+    let page = v
+        .pointer("/data/Page")
+        .ok_or_else(|| Error::AniList("search: missing data.Page".into()))?;
+    let media = page
+        .get("media")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::AniList("search: missing data.Page.media".into()))?;
+    let info = page.get("pageInfo");
+    Ok(CatalogPage {
+        media: media
+            .iter()
+            .filter(|m| !m.is_null())
+            .map(parse_catalog_media)
+            .collect(),
+        has_next_page: info
+            .and_then(|p| p.get("hasNextPage"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        current_page: info
+            .and_then(|p| p.get("currentPage"))
+            .and_then(Value::as_i64)
+            .unwrap_or(1),
+    })
+}
+
+/// Shred `MediaTagCollection` into tag rows for the search filter picker.
+pub fn parse_media_tags(v: &Value) -> Result<Vec<MediaTag>> {
+    let arr = v
+        .pointer("/data/MediaTagCollection")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::AniList("tags: missing data.MediaTagCollection".into()))?;
+    Ok(arr
+        .iter()
+        .filter_map(|t| {
+            Some(MediaTag {
+                name: str_field(t, "name")?,
+                category: str_field(t, "category"),
+                is_adult: t.get("isAdult").and_then(Value::as_bool).unwrap_or(false),
+            })
+        })
+        .collect())
 }
 
 fn parse_home_page(v: &Value, alias: &str) -> Vec<HomeMedia> {
@@ -297,6 +374,75 @@ mod tests {
         let s = parse_home_sections(&v).unwrap();
         assert!(s.trending.is_empty() && s.season.is_empty() && s.next_season.is_empty());
         assert!(parse_home_sections(&json!({"errors":[]})).is_err());
+    }
+
+    #[test]
+    fn home_media_parses_year_and_score() {
+        let m = json!({"id":154587,"title":{"romaji":"Sousou no Frieren","english":"Frieren"},
+            "coverImage":{"large":"http://c/1.jpg"},"episodes":28,"format":"TV","status":"FINISHED",
+            "seasonYear":2023,"averageScore":91,"nextAiringEpisode":null});
+        let h = parse_home_media(&m);
+        assert_eq!(h.season_year, Some(2023));
+        assert_eq!(h.average_score, Some(91));
+    }
+
+    #[test]
+    fn catalog_search_parses_page_and_meta() {
+        // Shape captured live from graphql.anilist.co (2026-07): a finished show,
+        // a not-yet-released one (null episodes/score/airing), and a releasing one.
+        let v = json!({"data":{"Page":{
+            "pageInfo":{"currentPage":1,"hasNextPage":true},
+            "media":[
+                {"id":154587,"title":{"romaji":"Sousou no Frieren","english":"Frieren"},
+                 "coverImage":{"large":"http://c/1.jpg"},"format":"TV","episodes":28,
+                 "averageScore":91,"seasonYear":2023,"status":"FINISHED",
+                 "genres":["Adventure","Drama","Fantasy"],"nextAiringEpisode":null,"isAdult":false},
+                {"id":189046,"title":{"romaji":"Re:Zero 4th Season","english":null},
+                 "coverImage":{"large":"http://c/2.jpg"},"format":"TV","episodes":19,
+                 "averageScore":90,"seasonYear":2026,"status":"RELEASING",
+                 "genres":["Drama","Fantasy","Psychological"],"nextAiringEpisode":{"episode":12},"isAdult":false},
+                {"id":113417,"title":{"romaji":"Overflow","english":null},
+                 "coverImage":{},"format":"ONA","episodes":null,"averageScore":null,
+                 "seasonYear":null,"status":"NOT_YET_RELEASED","genres":[],"nextAiringEpisode":null,"isAdult":true}
+            ]}}});
+        let p = parse_catalog_search(&v).unwrap();
+        assert!(p.has_next_page);
+        assert_eq!(p.current_page, 1);
+        assert_eq!(p.media.len(), 3);
+        assert_eq!(p.media[0].anilist_id, 154587);
+        assert_eq!(p.media[0].average_score, Some(91));
+        assert_eq!(p.media[0].season_year, Some(2023));
+        assert_eq!(p.media[0].genres, vec!["Adventure", "Drama", "Fantasy"]);
+        assert!(!p.media[0].is_adult);
+        // Releasing show: nextAiringEpisode drives the aired/total chip (aired = 12-1).
+        assert_eq!(p.media[1].next_episode, Some(12));
+        assert_eq!(p.media[1].episode_count, Some(19));
+        // Null-heavy adult ONA parses cleanly.
+        assert_eq!(p.media[2].cover_url, None);
+        assert_eq!(p.media[2].episode_count, None);
+        assert!(p.media[2].is_adult);
+        assert!(p.media[2].genres.is_empty());
+    }
+
+    #[test]
+    fn catalog_search_missing_page_errors() {
+        assert!(parse_catalog_search(&json!({"errors":[]})).is_err());
+    }
+
+    #[test]
+    fn media_tags_parse_name_category_adult() {
+        let v = json!({"data":{"MediaTagCollection":[
+            {"name":"4-koma","category":"Technical","isAdult":false},
+            {"name":"Ahegao","category":"Sexual Content","isAdult":true},
+            {"name":null,"category":"Bad","isAdult":false}
+        ]}});
+        let t = parse_media_tags(&v).unwrap();
+        // The null-named row is dropped.
+        assert_eq!(t.len(), 2);
+        assert_eq!(t[0].name, "4-koma");
+        assert_eq!(t[0].category.as_deref(), Some("Technical"));
+        assert!(!t[0].is_adult);
+        assert!(t[1].is_adult);
     }
 
     #[test]

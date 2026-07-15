@@ -236,6 +236,156 @@ export function searchAnilist(query: string): Promise<MediaInfo[]> {
 	return invoke('search_anilist', { query });
 }
 
+// ---------------------------------------------------------------------------
+// AniList catalog search + filters (reworked /search)
+// ---------------------------------------------------------------------------
+
+export interface CatalogMedia {
+	anilist_id: number;
+	title_romaji: string | null;
+	title_english: string | null;
+	cover_url: string | null;
+	format: string | null;
+	episode_count: number | null;
+	average_score: number | null;
+	season_year: number | null;
+	status: string | null;
+	genres: string[];
+	next_episode: number | null;
+	is_adult: boolean;
+}
+
+export interface CatalogPage {
+	media: CatalogMedia[];
+	has_next_page: boolean;
+	current_page: number;
+}
+
+export interface MediaTag {
+	name: string;
+	category: string | null;
+	is_adult: boolean;
+}
+
+// Filters sent to the `search_catalog` command. Snake_case keys match the Rust
+// `CatalogSearch` struct (serde). Empty arrays / null mean "no constraint".
+export interface CatalogFilters {
+	query: string;
+	page: number;
+	per_page: number;
+	genres: string[];
+	tags: string[];
+	season_year: number | null;
+	status: string[];
+	format: string[];
+	include_adult: boolean;
+}
+
+// AniList's fixed genre list (from their docs). "Hentai" opts into adult results.
+export const GENRES = [
+	'Action',
+	'Adventure',
+	'Comedy',
+	'Drama',
+	'Ecchi',
+	'Fantasy',
+	'Hentai',
+	'Horror',
+	'Mahou Shoujo',
+	'Mecha',
+	'Music',
+	'Mystery',
+	'Psychological',
+	'Sci-Fi',
+	'Slice of Life',
+	'Sports',
+	'Supernatural',
+	'Thriller'
+];
+
+// MediaStatus filter options (single-select in the UI).
+export const STATUS_OPTIONS: { value: string; label: string }[] = [
+	{ value: 'RELEASING', label: 'Releasing' },
+	{ value: 'FINISHED', label: 'Finished' },
+	{ value: 'CANCELLED', label: 'Cancelled' },
+	{ value: 'HIATUS', label: 'Hiatus' }
+];
+
+// MediaFormat filter options.
+export const FORMAT_OPTIONS: { value: string; label: string }[] = [
+	{ value: 'TV', label: 'TV' },
+	{ value: 'TV_SHORT', label: 'TV Short' },
+	{ value: 'MOVIE', label: 'Movie' },
+	{ value: 'SPECIAL', label: 'Special' },
+	{ value: 'OVA', label: 'OVA' },
+	{ value: 'ONA', label: 'ONA' },
+	{ value: 'MUSIC', label: 'Music' }
+];
+
+export function searchCatalog(filters: CatalogFilters): Promise<CatalogPage> {
+	return invoke('search_catalog', { filters });
+}
+
+export function getMediaTags(): Promise<MediaTag[]> {
+	return invoke('get_media_tags');
+}
+
+// ---------------------------------------------------------------------------
+// Card meta chips (format / year / episodes / score)
+// ---------------------------------------------------------------------------
+
+// The compact meta a card renders as small chips under its title. Every field
+// is optional so provider-only cards (Continue Watching) simply render none.
+export interface CardMeta {
+	format?: string | null;
+	year?: number | null;
+	episodes?: number | null;
+	/** Episodes aired so far while releasing (nextAiringEpisode.episode - 1). */
+	aired?: number | null;
+	releasing?: boolean;
+	/** Weighted mean score, 0–100. */
+	score?: number | null;
+}
+
+// Pretty label for an AniList MediaFormat enum value.
+export function formatLabel(format: string | null | undefined): string | null {
+	if (!format) return null;
+	const map: Record<string, string> = {
+		TV: 'TV',
+		TV_SHORT: 'TV Short',
+		MOVIE: 'Movie',
+		SPECIAL: 'Special',
+		OVA: 'OVA',
+		ONA: 'ONA',
+		MUSIC: 'Music'
+	};
+	return map[format] ?? format;
+}
+
+export function homeMediaMeta(m: HomeMedia): CardMeta {
+	const releasing = m.status === 'RELEASING';
+	return {
+		format: m.format,
+		year: m.season_year,
+		episodes: m.episode_count,
+		aired: releasing && m.next_episode ? m.next_episode - 1 : null,
+		releasing,
+		score: m.average_score
+	};
+}
+
+export function catalogMediaMeta(m: CatalogMedia): CardMeta {
+	const releasing = m.status === 'RELEASING';
+	return {
+		format: m.format,
+		year: m.season_year,
+		episodes: m.episode_count,
+		aired: releasing && m.next_episode ? m.next_episode - 1 : null,
+		releasing,
+		score: m.average_score
+	};
+}
+
 export function setAnimeMapping(providerId: string, anilistId: number): Promise<void> {
 	return invoke('set_anime_mapping', { providerId, anilistId });
 }
@@ -446,6 +596,8 @@ export interface HomeMedia {
 	status: string | null;
 	next_episode: number | null;
 	airing_at: number | null;
+	season_year: number | null;
+	average_score: number | null;
 }
 
 export interface HomeSections {

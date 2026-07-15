@@ -1,6 +1,6 @@
 <script lang="ts">
-	import type { AnimeSummary } from '$lib/api';
-	import { streamUrl } from '$lib/api';
+	import type { AnimeSummary, CardMeta } from '$lib/api';
+	import { streamUrl, formatLabel } from '$lib/api';
 	import coverPlaceholder from '$lib/assets/cover-placeholder.svg';
 
 	interface Props {
@@ -13,10 +13,32 @@
 		proxyCover?: boolean;
 		/** Hide the "N ep" badge (home rows where the count is unknown/0). */
 		showEpisodes?: boolean;
+		/** Meta chips (format / year / episodes / score) under the title. Only
+		 *  chips with data render; omit entirely for provider-only cards. */
+		meta?: CardMeta | null;
 	}
 
-	let { anime, onselect, caption = null, proxyCover = true, showEpisodes = true }: Props =
-		$props();
+	let {
+		anime,
+		onselect,
+		caption = null,
+		proxyCover = true,
+		showEpisodes = true,
+		meta = null
+	}: Props = $props();
+
+	// The episodes chip: "aired/total" while releasing, else "N ep".
+	const episodesChip = $derived.by(() => {
+		if (!meta) return null;
+		const { episodes, aired, releasing } = meta;
+		if (releasing && aired && aired > 0) {
+			return episodes ? `${aired}/${episodes}` : `${aired} ep`;
+		}
+		if (episodes && episodes > 0) return `${episodes} ep`;
+		return null;
+	});
+	// A high score gets a subtle green tint (trading-up), per DESIGN.md.
+	const scoreHigh = $derived(!!meta?.score && meta.score >= 75);
 
 	// allanime thumbnails are referer-gated; route them through the proxy so
 	// they load inside the webview. AniList covers (home rows) load directly.
@@ -46,6 +68,22 @@
 	</div>
 	<div class="meta">
 		<span class="title">{display}</span>
+		{#if meta}
+			<div class="chips">
+				{#if formatLabel(meta.format)}
+					<span class="chip">{formatLabel(meta.format)}</span>
+				{/if}
+				{#if meta.year}
+					<span class="chip">{meta.year}</span>
+				{/if}
+				{#if episodesChip}
+					<span class="chip">{episodesChip}</span>
+				{/if}
+				{#if meta.score}
+					<span class="chip score" class:high={scoreHigh}>★ {meta.score}</span>
+				{/if}
+			</div>
+		{/if}
 	</div>
 	<!-- Full-title tooltip: card titles clamp to 2 lines, so long ones cut off. -->
 	<div class="tooltip" role="tooltip">
@@ -132,6 +170,9 @@
 	}
 	.meta {
 		padding: 0 2px;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-xxs);
 	}
 	.title {
 		font: var(--text-title-sm);
@@ -141,5 +182,22 @@
 		line-clamp: 2;
 		-webkit-box-orient: vertical;
 		overflow: hidden;
+	}
+	.chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--space-xxs);
+	}
+	.chip {
+		background: var(--color-surface-card);
+		color: var(--color-muted-strong);
+		font: var(--text-caption);
+		padding: 1px 6px;
+		border-radius: var(--radius-sm);
+		white-space: nowrap;
+	}
+	/* High scores get a subtle green tint; no yellow (reserved for CTAs). */
+	.chip.score.high {
+		color: var(--color-up);
 	}
 </style>
