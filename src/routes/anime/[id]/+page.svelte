@@ -8,6 +8,7 @@
 		getAnimeListState,
 		setListEntry,
 		searchAnilist,
+		getMediaOverview,
 		setAnimeMapping,
 		isDesktop,
 		downloadsForAnime,
@@ -20,6 +21,7 @@
 		type ListEntry,
 		type MediaListStatus,
 		type MediaInfo,
+		type MediaOverview,
 		type DownloadRow,
 		type DownloadProgressEvent,
 		type DownloadStateEvent
@@ -45,6 +47,43 @@
 	let entry = $state<ListEntry | null>(null);
 	let episodeCount = $state<number | null>(null);
 	let matching = $state(false);
+
+	// Synopsis + genres, fetched once the AniList mapping resolves.
+	let overview = $state<MediaOverview | null>(null);
+	let descExpanded = $state(false);
+
+	$effect(() => {
+		const aid = anilistId;
+		overview = null;
+		descExpanded = false;
+		if (aid === null || !isDesktop()) return;
+		getMediaOverview(aid)
+			.then((o) => {
+				if (anilistId === aid) overview = o;
+			})
+			.catch(() => {
+				/* synopsis is best-effort */
+			});
+	});
+
+	// AniList descriptions carry simple HTML (<br>, <i>) and entities; render
+	// them as plain text with paragraph breaks preserved.
+	function cleanDescription(html: string): string {
+		return html
+			.replace(/<br\s*\/?>/gi, '\n')
+			.replace(/<[^>]+>/g, '')
+			.replace(/&amp;/g, '&')
+			.replace(/&lt;/g, '<')
+			.replace(/&gt;/g, '>')
+			.replace(/&quot;/g, '"')
+			.replace(/&#0?39;/g, "'")
+			.replace(/&hellip;/g, '…')
+			.replace(/&mdash;/g, '—')
+			.replace(/&ndash;/g, '–')
+			.replace(/\n{3,}/g, '\n\n')
+			.trim();
+	}
+	const desc = $derived(overview?.description ? cleanDescription(overview.description) : null);
 
 	// "Wrong match?" search UI.
 	let showRematch = $state(false);
@@ -292,6 +331,22 @@
 			{episodes.length || anime?.available_episodes || 0} episodes · {dub ? 'Dub' : 'Sub'}
 		</p>
 
+		{#if overview}
+			{#if overview.genres.length > 0}
+				<div class="genres">
+					{#each overview.genres as g (g)}<span class="genre">{g}</span>{/each}
+				</div>
+			{/if}
+			{#if desc}
+				<p class="desc" class:clamped={!descExpanded}>{desc}</p>
+				{#if desc.length > 260}
+					<button class="desc-toggle" onclick={() => (descExpanded = !descExpanded)}>
+						{descExpanded ? 'Show less' : 'Show more'}
+					</button>
+				{/if}
+			{/if}
+		{/if}
+
 		{#if isDesktop()}
 			<div class="anilist">
 				{#if anilistId !== null}
@@ -479,6 +534,46 @@
 	.meta {
 		font: var(--text-num-sm);
 		color: var(--color-muted);
+	}
+	.genres {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--space-xxs);
+		margin-top: var(--space-sm);
+	}
+	.genre {
+		background: var(--color-surface-card);
+		color: var(--color-muted-strong);
+		font: var(--text-caption);
+		padding: 2px 8px;
+		border-radius: var(--radius-pill);
+	}
+	.desc {
+		font: var(--text-body-md);
+		color: var(--color-body);
+		margin: var(--space-sm) 0 0;
+		white-space: pre-line;
+		max-width: 640px;
+	}
+	.desc.clamped {
+		display: -webkit-box;
+		-webkit-line-clamp: 4;
+		line-clamp: 4;
+		-webkit-box-orient: vertical;
+		overflow: hidden;
+	}
+	.desc-toggle {
+		background: none;
+		border: none;
+		padding: 0;
+		margin-top: var(--space-xxs);
+		color: var(--color-muted-strong);
+		font: var(--text-body-sm);
+		text-decoration: underline;
+		cursor: pointer;
+	}
+	.desc-toggle:hover {
+		color: var(--color-on-dark);
 	}
 	.anilist {
 		display: flex;

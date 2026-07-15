@@ -3,7 +3,7 @@
 
 use crate::models::{
     AiringInfo, CatalogMedia, CatalogPage, HomeMedia, HomeSections, MediaInfo, MediaListStatus,
-    MediaTag, RemoteListEntry, Viewer,
+    MediaOverview, MediaTag, RemoteListEntry, Viewer,
 };
 use crate::{Error, Result};
 use serde_json::Value;
@@ -59,6 +59,26 @@ pub fn parse_media_obj(m: &Value) -> MediaInfo {
         cover_url: m.get("coverImage").and_then(|c| str_field(c, "large")),
         episode_count: m.get("episodes").and_then(Value::as_i64),
         format: str_field(m, "format"),
+    }
+}
+
+/// Shred one media object of the overview query (description + meta).
+pub fn parse_media_overview(m: &Value) -> MediaOverview {
+    let genres = m
+        .get("genres")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|g| g.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    MediaOverview {
+        anilist_id: m.get("id").and_then(Value::as_i64).unwrap_or(0),
+        description: str_field(m, "description"),
+        genres,
+        average_score: m.get("averageScore").and_then(Value::as_i64),
+        season_year: m.get("seasonYear").and_then(Value::as_i64),
     }
 }
 
@@ -422,6 +442,26 @@ mod tests {
         assert_eq!(p.media[2].episode_count, None);
         assert!(p.media[2].is_adult);
         assert!(p.media[2].genres.is_empty());
+    }
+
+    #[test]
+    fn media_overview_parses_description_and_meta() {
+        // Shape as returned by graphql.anilist.co: description carries simple
+        // HTML (<br>, <i>) and entities; genres is a plain string array.
+        let m = json!({"id":154587,
+            "description":"After the party of heroes defeated the Demon King&hellip;<br><br><i>(Source: Crunchyroll)</i>",
+            "genres":["Adventure","Drama","Fantasy"],"averageScore":91,"seasonYear":2023});
+        let o = parse_media_overview(&m);
+        assert_eq!(o.anilist_id, 154587);
+        assert!(o.description.unwrap().starts_with("After the party"));
+        assert_eq!(o.genres, vec!["Adventure", "Drama", "Fantasy"]);
+        assert_eq!(o.average_score, Some(91));
+        assert_eq!(o.season_year, Some(2023));
+        // Null-heavy media parses cleanly.
+        let o = parse_media_overview(&json!({"id":1,"description":null,"genres":null}));
+        assert_eq!(o.description, None);
+        assert!(o.genres.is_empty());
+        assert_eq!(o.average_score, None);
     }
 
     #[test]

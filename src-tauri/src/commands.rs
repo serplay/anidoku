@@ -7,8 +7,8 @@ use anidoku_core::anilist::{current_and_next_from_unix, CatalogSearch};
 use anidoku_core::downloads as downloads_core;
 use anidoku_core::models::{
     AnimeStorage, AnimeSummary, CatalogPage, ContinueWatchingItem, DownloadRow, DownloadState,
-    HomeSections, LibraryItem, ListEntry, MediaInfo, MediaListStatus, MediaTag, Notification,
-    StreamKind, TranslationType, VideoSource, Viewer, WatchState,
+    HomeSections, LibraryItem, ListEntry, MediaInfo, MediaListStatus, MediaOverview, MediaTag,
+    Notification, StreamKind, TranslationType, VideoSource, Viewer, WatchState,
 };
 use anidoku_core::provider::Provider;
 use anidoku_core::sync::{best_match, best_provider_match};
@@ -306,6 +306,20 @@ pub async fn get_anime_list_state(
 #[tauri::command]
 pub async fn search_anilist(state: State<'_, AppState>, query: String) -> CmdResult<Vec<MediaInfo>> {
     state.anilist.search_media(&query).await.map_err(map_err)
+}
+
+/// Synopsis + meta for the detail page, fetched once the AniList mapping is
+/// known. Public query, no auth needed.
+#[tauri::command]
+pub async fn get_media_overview(
+    state: State<'_, AppState>,
+    anilist_id: i64,
+) -> CmdResult<Option<MediaOverview>> {
+    state
+        .anilist
+        .media_overview(anilist_id)
+        .await
+        .map_err(map_err)
 }
 
 /// AniList catalog search for the reworked /search page. The provider handoff

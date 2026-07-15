@@ -146,6 +146,7 @@ pub fn run() {
             commands::set_list_entry,
             commands::get_anime_list_state,
             commands::search_anilist,
+            commands::get_media_overview,
             commands::search_catalog,
             commands::get_media_tags,
             commands::set_anime_mapping,

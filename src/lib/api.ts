@@ -163,6 +163,16 @@ export interface MediaInfo {
 	format: string | null;
 }
 
+/** Detail-page synopsis + meta, fetched once the AniList mapping is known. */
+export interface MediaOverview {
+	anilist_id: number;
+	/** May contain simple HTML (<br>, <i>) and entities — sanitize before rendering. */
+	description: string | null;
+	genres: string[];
+	average_score: number | null;
+	season_year: number | null;
+}
+
 export interface Settings {
 	client_id: string | null;
 	redirect_url: string;
@@ -234,6 +244,10 @@ export function getAnimeListState(
 
 export function searchAnilist(query: string): Promise<MediaInfo[]> {
 	return invoke('search_anilist', { query });
+}
+
+export function getMediaOverview(anilistId: number): Promise<MediaOverview | null> {
+	return invoke('get_media_overview', { anilistId });
 }
 
 // ---------------------------------------------------------------------------

@@ -272,6 +272,19 @@ pub struct MediaInfo {
     pub format: Option<String>,
 }
 
+/// Detail-page overview fetched by AniList id: the synopsis plus the meta the
+/// hero doesn't get from the provider.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaOverview {
+    pub anilist_id: i64,
+    /// AniList synopsis. May contain simple HTML (`<br>`, `<i>`) and entities;
+    /// the UI sanitizes before rendering.
+    pub description: Option<String>,
+    pub genres: Vec<String>,
+    pub average_score: Option<i64>,
+    pub season_year: Option<i64>,
+}
+
 /// A media card for the home page rows (Trending / This Season / Next Season).
 /// Serialized straight into `home_cache` as JSON and returned to the UI.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

@@ -19,13 +19,13 @@ pub mod season;
 
 pub use parse::{
     parse_airing, parse_catalog_search, parse_home_sections, parse_media_list_collection,
-    parse_media_search, parse_media_tags, parse_save_response, parse_viewer,
+    parse_media_overview, parse_media_search, parse_media_tags, parse_save_response, parse_viewer,
 };
 pub use season::{current_and_next_from_unix, Season};
 
 use crate::models::{
-    AiringInfo, CatalogPage, HomeSections, MediaInfo, MediaListStatus, MediaTag, RemoteListEntry,
-    Viewer,
+    AiringInfo, CatalogPage, HomeSections, MediaInfo, MediaListStatus, MediaOverview, MediaTag,
+    RemoteListEntry, Viewer,
 };
 use crate::{Error, Result};
 use reqwest::{Client, StatusCode};
@@ -65,6 +65,13 @@ query ($search: String) { \
 const MEDIA_BY_ID_QUERY: &str = "\
 query ($id: Int) { Media(id: $id, type: ANIME) { \
   id episodes format title { romaji english native } synonyms coverImage { large } \
+} }";
+
+/// Detail-page overview: the synopsis plus a little meta, fetched lazily once
+/// a show's AniList mapping is known.
+const MEDIA_OVERVIEW_QUERY: &str = "\
+query ($id: Int) { Media(id: $id, type: ANIME) { \
+  id description genres averageScore seasonYear \
 } }";
 
 /// Home rows: Trending (releasing), Popular This Season, Popular Next Season —
@@ -358,6 +365,17 @@ impl AniListClient {
         let media = v.pointer("/data/Media");
         match media {
             Some(m) if !m.is_null() => Ok(Some(parse::parse_media_obj(m))),
+            _ => Ok(None),
+        }
+    }
+
+    /// Public (no-auth) synopsis + meta for the detail page.
+    pub async fn media_overview(&self, id: i64) -> Result<Option<MediaOverview>> {
+        let v = self
+            .post(None, MEDIA_OVERVIEW_QUERY, json!({ "id": id }))
+            .await?;
+        match v.pointer("/data/Media") {
+            Some(m) if !m.is_null() => Ok(Some(parse::parse_media_overview(m))),
             _ => Ok(None),
         }
     }
