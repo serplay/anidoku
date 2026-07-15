@@ -41,11 +41,34 @@ pub struct AppState {
     pub downloads_root: PathBuf,
 }
 
+/// Platform data root. On Android `dirs::data_dir()` is `None` and the
+/// `temp_dir()` fallback lands in the app's **cache** dir, which the OS may
+/// clear under storage pressure — wiping the DB and every download. Persist
+/// next door in `files/` instead (TMPDIR is `<app root>/cache`).
+#[cfg(target_os = "android")]
+fn base_data_dir() -> PathBuf {
+    let tmp = std::env::temp_dir();
+    let dir = match tmp.parent() {
+        Some(app_root) => app_root.join("files"),
+        None => tmp.clone(),
+    };
+    // One-time migration for installs that wrote into cache/ before this fix.
+    let old = tmp.join("AniDoku");
+    if old.is_dir() && !dir.join("AniDoku").exists() {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::rename(&old, dir.join("AniDoku"));
+    }
+    dir
+}
+
+#[cfg(not(target_os = "android"))]
+fn base_data_dir() -> PathBuf {
+    dirs::data_dir().unwrap_or_else(std::env::temp_dir)
+}
+
 impl AppState {
     fn new(download_events: tokio::sync::mpsc::UnboundedSender<DownloadEvent>) -> Self {
-        let data_dir = dirs::data_dir()
-            .unwrap_or_else(std::env::temp_dir)
-            .join("AniDoku");
+        let data_dir = base_data_dir().join("AniDoku");
         let db_path = data_dir.join("anidoku.db");
         let db = Arc::new(Database::open(&db_path).expect("open database"));
         let proxy = Arc::new(ProxyClient::new());
@@ -121,13 +144,7 @@ pub fn run() {
                 // Android: hold a foreground service while rows are queued or
                 // downloading, so the OS doesn't kill the engine off-screen.
                 #[cfg(target_os = "android")]
-                let mut fg_active = {
-                    let active = dl_db.count_active_downloads().unwrap_or(0) > 0;
-                    if active {
-                        android::set_download_service_active(true);
-                    }
-                    active
-                };
+                let mut fg_active = false;
                 while let Some(ev) = dl_rx.recv().await {
                     match ev {
                         DownloadEvent::Progress(p) => {
@@ -140,7 +157,7 @@ pub fn run() {
                                 let active = dl_db.count_active_downloads().unwrap_or(0) > 0;
                                 if active != fg_active {
                                     fg_active = active;
-                                    android::set_download_service_active(active);
+                                    android::set_download_service_active(&handle, active);
                                 }
                             }
                         }

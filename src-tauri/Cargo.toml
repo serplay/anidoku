@@ -24,6 +24,6 @@ urlencoding = "2"
 dirs = "5"
 
 [target.'cfg(target_os = "android")'.dependencies]
-# JNI glue for the download foreground service (src/android.rs).
+# JNI glue for the download foreground service (src/android.rs). Must track
+# the jni version wry uses (with_webview hands us its JNIEnv).
 jni = "0.21"
-ndk-context = "0.1"

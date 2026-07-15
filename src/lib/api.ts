@@ -423,7 +423,12 @@ export function onEvent<T>(event: string, handler: (payload: T) => void): Promis
 // fine for images (fetched normally by the webview); it is NOT used for media,
 // which needs Range/206 support — see `mediaUrl`.
 export function streamUrl(upstream: string, referer: string | null): string {
-	let s = `stream://localhost/?url=${encodeURIComponent(upstream)}`;
+	// Android (and Windows) webviews can't register real custom schemes;
+	// Tauri serves them as http://<scheme>.localhost there.
+	const base = /android/i.test(navigator.userAgent)
+		? 'http://stream.localhost/'
+		: 'stream://localhost/';
+	let s = `${base}?url=${encodeURIComponent(upstream)}`;
 	if (referer) s += `&referer=${encodeURIComponent(referer)}`;
 	return s;
 }
