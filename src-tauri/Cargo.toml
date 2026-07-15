@@ -22,3 +22,8 @@ serde_json = { workspace = true }
 tokio = { workspace = true }
 urlencoding = "2"
 dirs = "5"
+
+[target.'cfg(target_os = "android")'.dependencies]
+# JNI glue for the download foreground service (src/android.rs).
+jni = "0.21"
+ndk-context = "0.1"

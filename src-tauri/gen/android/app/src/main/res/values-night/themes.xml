@@ -1,6 +1,8 @@
 <resources xmlns:tools="http://schemas.android.com/tools">
     <!-- Base application theme. -->
     <style name="Theme.anidoku" parent="Theme.MaterialComponents.DayNight.NoActionBar">
-        <!-- Customize your theme here. -->
+        <!-- Dark canvas behind the webview + system bars (edge-to-edge). -->
+        <item name="android:windowBackground">@color/anidoku_canvas</item>
+        <item name="android:windowLightStatusBar">false</item>
     </style>
 </resources>

@@ -3,6 +3,8 @@
 //! that lets the webview player fetch referer-gated media.
 
 mod airing;
+#[cfg(target_os = "android")]
+mod android;
 mod auth;
 mod commands;
 mod stream;
@@ -89,6 +91,8 @@ pub fn run() {
     let state = AppState::new(dl_tx);
     let proxy = state.proxy.clone();
     let downloads = state.downloads.clone();
+    #[cfg(target_os = "android")]
+    let dl_db = state.db.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -114,6 +118,16 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 downloads.start();
+                // Android: hold a foreground service while rows are queued or
+                // downloading, so the OS doesn't kill the engine off-screen.
+                #[cfg(target_os = "android")]
+                let mut fg_active = {
+                    let active = dl_db.count_active_downloads().unwrap_or(0) > 0;
+                    if active {
+                        android::set_download_service_active(true);
+                    }
+                    active
+                };
                 while let Some(ev) = dl_rx.recv().await {
                     match ev {
                         DownloadEvent::Progress(p) => {
@@ -121,6 +135,14 @@ pub fn run() {
                         }
                         DownloadEvent::State(s) => {
                             let _ = handle.emit("download:state", s);
+                            #[cfg(target_os = "android")]
+                            {
+                                let active = dl_db.count_active_downloads().unwrap_or(0) > 0;
+                                if active != fg_active {
+                                    fg_active = active;
+                                    android::set_download_service_active(active);
+                                }
+                            }
                         }
                     }
                 }

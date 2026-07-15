@@ -226,6 +226,17 @@ impl Database {
         )?)
     }
 
+    /// Rows that still need the process alive (queued or actively
+    /// downloading) — drives the Android foreground service.
+    pub fn count_active_downloads(&self) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.query_row(
+            "SELECT count(*) FROM downloads WHERE state IN ('queued', 'downloading')",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+
     /// Startup recovery: rows stuck in `downloading` (app was killed mid-job)
     /// revert to `queued` so the scheduler resumes them from their checkpoints.
     pub fn recover_in_flight_downloads(&self) -> Result<usize> {
