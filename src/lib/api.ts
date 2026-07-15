@@ -296,6 +296,7 @@ export const GENRES = [
 	'Music',
 	'Mystery',
 	'Psychological',
+	'Romance',
 	'Sci-Fi',
 	'Slice of Life',
 	'Sports',
