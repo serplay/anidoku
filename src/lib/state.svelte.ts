@@ -138,3 +138,23 @@ export async function handleUnreleasedClick(
 	}
 	pushToast(`Not released yet${airs}`);
 }
+
+// Handle a click on a catalog entry with no streamable provider source: never
+// resolve. Toast that it isn't available and — when signed in — add it to the
+// AniList Planning list (same affordance as the unreleased case).
+export async function handleUnavailableClick(
+	anilistId: number,
+	title: string
+): Promise<void> {
+	const name = title || 'This title';
+	if (authState.logged_in) {
+		try {
+			await setListEntry(anilistId, 'PLANNING', 0, null);
+			pushToast(`No streamable source · added ${name} to Planning`, 'sync');
+			return;
+		} catch {
+			/* fall through to the plain info toast */
+		}
+	}
+	pushToast('No streamable source found for this title');
+}

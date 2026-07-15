@@ -163,6 +163,7 @@ pub fn run() {
             commands::refresh_home,
             commands::get_continue_watching,
             commands::resolve_provider_for_anilist,
+            commands::check_availability,
             commands::get_notifications,
             commands::get_upcoming,
             commands::unread_notifications,

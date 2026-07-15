@@ -697,6 +697,63 @@ pub async fn resolve_provider_for_anilist(
     Ok(Some(m.clone()))
 }
 
+/// Re-check a negative availability result after this many seconds (7 days).
+/// Positive results never expire — a stored provider mapping already implies
+/// the show is streamable.
+const AVAILABILITY_NEG_TTL_SECS: i64 = 7 * 24 * 60 * 60;
+
+/// Whether an AniList title resolves to a streamable provider show, using the
+/// same reverse-resolution as `resolve_provider_for_anilist` but WITHOUT
+/// navigating. The outcome is cached: positives permanently (a mapping implies
+/// available), negatives with a 7-day TTL so repeat searches don't re-hammer the
+/// provider. Used to de-emphasise catalog entries the provider doesn't have.
+#[tauri::command]
+pub async fn check_availability(
+    state: State<'_, AppState>,
+    anilist_id: i64,
+    title: String,
+    episodes: Option<u32>,
+) -> CmdResult<bool> {
+    // 1. An existing provider mapping means it's streamable — permanent yes.
+    if let Ok(Some(_)) = state.db.provider_id_for_anilist(anilist_id) {
+        let _ = state.db.set_availability(anilist_id, true);
+        return Ok(true);
+    }
+
+    // 2. Serve a cached outcome: positives always, negatives within their TTL.
+    if let Ok(Some((available, checked_at))) = state.db.get_availability(anilist_id) {
+        if available || now() - checked_at < AVAILABILITY_NEG_TTL_SECS {
+            return Ok(available);
+        }
+    }
+
+    // 3. Reverse-resolve against the provider (no navigation). Persist the
+    //    discovered mapping so a later click is instant, then cache the outcome.
+    let results = state
+        .provider
+        .search(&title, TranslationType::Sub)
+        .await
+        .map_err(map_err)?;
+    for r in &results {
+        let _ = state.db.cache_anime(
+            &r.provider_id,
+            &r.title,
+            r.title_english.as_deref(),
+            r.cover_url.as_deref(),
+            Some(r.available_episodes),
+        );
+    }
+    let available = match best_provider_match(anilist_id, &title, episodes, &results) {
+        Some(m) => {
+            let _ = state.db.link_provider_anilist(&m.provider_id, anilist_id);
+            true
+        }
+        None => false,
+    };
+    let _ = state.db.set_availability(anilist_id, available);
+    Ok(available)
+}
+
 /// Inbox: fired episode notifications, newest first.
 #[tauri::command]
 pub fn get_notifications(state: State<'_, AppState>) -> CmdResult<Vec<Notification>> {

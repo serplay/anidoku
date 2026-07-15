@@ -669,6 +669,17 @@ export function resolveProviderForAnilist(
 	return invoke('resolve_provider_for_anilist', { anilistId, title, episodes });
 }
 
+// Whether an AniList title resolves to a streamable provider show (cached in
+// the DB: positives permanent, negatives with a 7-day TTL). Used to lazily
+// de-emphasise catalog entries the provider doesn't have.
+export function checkAvailability(
+	anilistId: number,
+	title: string,
+	episodes: number | null
+): Promise<boolean> {
+	return invoke('check_availability', { anilistId, title, episodes });
+}
+
 export function getNotifications(): Promise<Notification[]> {
 	return invoke('get_notifications');
 }

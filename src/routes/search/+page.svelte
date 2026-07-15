@@ -5,6 +5,7 @@
 		searchCatalog,
 		getMediaTags,
 		resolveProviderForAnilist,
+		checkAvailability,
 		catalogMediaMeta,
 		displayTitle,
 		isDesktop,
@@ -22,7 +23,8 @@
 		catalogState,
 		emptyCatalogFilters,
 		isUnreleasedStatus,
-		handleUnreleasedClick
+		handleUnreleasedClick,
+		handleUnavailableClick
 	} from '$lib/state.svelte';
 	import SearchInput from '$lib/components/SearchInput.svelte';
 	import Button from '$lib/components/Button.svelte';
@@ -55,6 +57,46 @@
 	// AniList ids currently resolving to a provider show (click feedback).
 	let resolving = $state<Record<number, boolean>>({});
 
+	// Streamable-source availability per AniList id, filled in lazily after
+	// results render (DB-cached, gentle concurrency). Absent = unchecked (card
+	// looks normal); false = downgraded + "Not available" badge; true = normal.
+	let availability = $state<Record<number, boolean>>({});
+	let availSeq = 0;
+	// "Only streamable" toggle hides entries known to have no source.
+	let onlyStreamable = $state(false);
+	const shownResults = $derived(
+		onlyStreamable ? results.filter((m) => availability[m.anilist_id] !== false) : results
+	);
+
+	// Check a page of results for a streamable source, 3 at a time. Skips ids
+	// already known and not-yet-released titles (nothing to stream). Writes each
+	// answer as it lands; bails if a newer search superseded this batch.
+	async function checkAvailabilityBatch(items: CatalogMedia[]) {
+		if (!isDesktop()) return;
+		const seq = availSeq;
+		const queue = items.filter(
+			(m) => !(m.anilist_id in availability) && !isUnreleasedStatus(m.status)
+		);
+		let idx = 0;
+		const worker = async () => {
+			while (idx < queue.length) {
+				const m = queue[idx++];
+				try {
+					const ok = await checkAvailability(
+						m.anilist_id,
+						m.title_english ?? m.title_romaji ?? '',
+						m.episode_count
+					);
+					if (seq !== availSeq) return; // superseded by a newer search
+					availability = { ...availability, [m.anilist_id]: ok };
+				} catch {
+					/* leave unchecked — the card stays normal, no flicker */
+				}
+			}
+		};
+		await Promise.all([worker(), worker(), worker()]);
+	}
+
 	// URL is the source of truth for filters (back/forward + Library ?q= deep-link).
 	// This effect runs whenever the query string changes: parse it, and either run
 	// a search (any criteria present) or restore the last cached result set.
@@ -76,6 +118,10 @@
 			hasNext = catalogState.hasNext;
 			curPage = catalogState.page;
 			ran = true;
+			// Re-check availability for the restored set (DB-cached, so cheap).
+			availSeq++;
+			availability = {};
+			void checkAvailabilityBatch(results);
 		}
 	});
 
@@ -157,6 +203,13 @@
 			catalogState.page = curPage;
 			catalogState.dub = dub;
 			catalogState.ran = true;
+			// New search wipes the availability map; a "load more" keeps it and
+			// only checks the freshly-appended page.
+			if (pageNum === 1) {
+				availSeq++;
+				availability = {};
+			}
+			void checkAvailabilityBatch(res.media);
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 			if (pageNum === 1) results = [];
@@ -203,6 +256,11 @@
 		// Not-yet-aired shows have no stream to resolve — don't hit the provider.
 		if (isUnreleasedStatus(m.status)) {
 			await handleUnreleasedClick(m.anilist_id, title, m.season_year);
+			return;
+		}
+		// Known to have no streamable source — inform + offer Add to Planning.
+		if (availability[m.anilist_id] === false) {
+			await handleUnavailableClick(m.anilist_id, title);
 			return;
 		}
 		resolving = { ...resolving, [m.anilist_id]: true };
@@ -358,6 +416,9 @@
 			</div>
 
 			<div class="panelactions">
+				<label class="streamable">
+					<input type="checkbox" bind:checked={onlyStreamable} /> Only streamable
+				</label>
 				<Button onclick={submit} disabled={loading}>Apply filters</Button>
 			</div>
 		</div>
@@ -386,12 +447,13 @@
 	</div>
 {:else if results.length > 0}
 	<div class="grid">
-		{#each results as m (m.anilist_id)}
+		{#each shownResults as m (m.anilist_id)}
 			<AnimeCard
 				anime={cardSummary(m)}
 				meta={catalogMediaMeta(m)}
 				proxyCover={false}
 				showEpisodes={false}
+				unavailable={availability[m.anilist_id] === false}
 				onselect={() => open(m)}
 			/>
 		{/each}
@@ -609,7 +671,21 @@
 	}
 	.panelactions {
 		display: flex;
-		justify-content: flex-end;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-md);
+	}
+	.streamable {
+		display: flex;
+		align-items: center;
+		gap: var(--space-xxs);
+		font: var(--text-body-sm);
+		color: var(--color-muted-strong);
+		cursor: pointer;
+		user-select: none;
+	}
+	.streamable input {
+		accent-color: var(--color-primary);
 	}
 	.hint {
 		font: var(--text-body-sm);

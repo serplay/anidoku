@@ -185,6 +185,36 @@ impl Database {
         Ok(row)
     }
 
+    // ---- availability (streamable-source cache, keyed by anilist_id) ----
+
+    /// Cached availability outcome as `(available, checked_at)`, or `None` when
+    /// the title has never been checked.
+    pub fn get_availability(&self, anilist_id: i64) -> Result<Option<(bool, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT available, checked_at FROM availability WHERE anilist_id = ?1",
+                params![anilist_id],
+                |r| Ok((r.get::<_, i64>(0)? != 0, r.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Record an availability outcome, stamped now.
+    pub fn set_availability(&self, anilist_id: i64, available: bool) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO availability (anilist_id, available, checked_at)
+             VALUES (?1, ?2, unixepoch())
+             ON CONFLICT(anilist_id) DO UPDATE SET
+               available  = excluded.available,
+               checked_at = excluded.checked_at",
+            params![anilist_id, available as i64],
+        )?;
+        Ok(())
+    }
+
     // ---- media_cache (AniList metadata, keyed by anilist_id) ----
 
     pub fn upsert_media(

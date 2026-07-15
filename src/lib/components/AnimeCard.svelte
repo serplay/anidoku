@@ -16,6 +16,9 @@
 		/** Meta chips (format / year / episodes / score) under the title. Only
 		 *  chips with data render; omit entirely for provider-only cards. */
 		meta?: CardMeta | null;
+		/** De-emphasise the card and show a "Not available" corner badge when the
+		 *  provider has no streamable source (catalog search). */
+		unavailable?: boolean;
 	}
 
 	let {
@@ -24,7 +27,8 @@
 		caption = null,
 		proxyCover = true,
 		showEpisodes = true,
-		meta = null
+		meta = null,
+		unavailable = false
 	}: Props = $props();
 
 	// The episodes chip: "aired/total" while releasing, else "N ep".
@@ -52,7 +56,7 @@
 	const display = $derived(anime.title_english ?? anime.title);
 </script>
 
-<button class="card" onclick={() => onselect?.(anime)}>
+<button class="card" class:unavailable onclick={() => onselect?.(anime)}>
 	<div class="cover">
 		<img
 			src={cover ?? coverPlaceholder}
@@ -60,6 +64,9 @@
 			loading="lazy"
 			onerror={(e) => ((e.currentTarget as HTMLImageElement).src = coverPlaceholder)}
 		/>
+		{#if unavailable}
+			<span class="badge unavail">Not available</span>
+		{/if}
 		{#if caption}
 			<span class="badge caption">{caption}</span>
 		{:else if showEpisodes && anime.available_episodes > 0}
@@ -166,6 +173,19 @@
 	}
 	.badge.caption {
 		color: var(--color-body);
+	}
+	/* Muted (not red) corner badge for entries with no streamable source. */
+	.badge.unavail {
+		right: auto;
+		bottom: auto;
+		top: var(--space-xs);
+		left: var(--space-xs);
+		color: var(--color-muted-strong);
+	}
+	/* De-emphasise the whole card while keeping it clickable (Add to Planning). */
+	.card.unavailable .cover img,
+	.card.unavailable .meta {
+		opacity: 0.55;
 	}
 	.meta {
 		padding: 0 2px;

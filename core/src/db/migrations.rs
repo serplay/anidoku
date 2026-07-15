@@ -141,6 +141,18 @@ const MIGRATIONS: &[&str] = &[
         value TEXT NOT NULL
     );
     ",
+    // 006: catalog-source availability cache. Records whether an AniList title
+    // resolves to a streamable provider show, so repeat searches don't re-hammer
+    // the provider. Positive results are effectively permanent (a mapping in
+    // `anime` already implies available); negative results carry a TTL and are
+    // re-checked after it lapses.
+    "
+    CREATE TABLE availability (
+        anilist_id INTEGER PRIMARY KEY,
+        available  INTEGER NOT NULL,
+        checked_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    ",
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
