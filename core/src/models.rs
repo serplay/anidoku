@@ -272,6 +272,92 @@ pub struct MediaInfo {
     pub format: Option<String>,
 }
 
+/// A media card for the home page rows (Trending / This Season / Next Season).
+/// Serialized straight into `home_cache` as JSON and returned to the UI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct HomeMedia {
+    pub anilist_id: i64,
+    pub title_romaji: Option<String>,
+    pub title_english: Option<String>,
+    pub cover_url: Option<String>,
+    pub episode_count: Option<i64>,
+    pub format: Option<String>,
+    /// AniList media status ("RELEASING", "NOT_YET_RELEASED", "FINISHED", ...).
+    pub status: Option<String>,
+    /// Next airing episode number, when the show is currently releasing.
+    pub next_episode: Option<i64>,
+    /// Unix seconds the next episode airs at (drives the "Ep N in Xd" caption).
+    pub airing_at: Option<i64>,
+}
+
+/// The three AniList-sourced home sections, one batched fetch.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct HomeSections {
+    pub trending: Vec<HomeMedia>,
+    pub season: Vec<HomeMedia>,
+    pub next_season: Vec<HomeMedia>,
+}
+
+/// One Continue-Watching card: a local CURRENT/REPEATING entry joined with the
+/// media cache and provider mapping, plus the next unwatched episode.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ContinueWatchingItem {
+    pub anilist_id: i64,
+    pub title_romaji: Option<String>,
+    pub title_english: Option<String>,
+    pub cover_url: Option<String>,
+    pub episode_count: Option<i64>,
+    /// Watched-episode count (list progress).
+    pub progress: i64,
+    /// The episode number to resume on (progress + 1), as a string for the
+    /// provider watch route. `None` when the show is already fully watched.
+    pub next_episode: Option<String>,
+    /// Provider id when a mapping exists (enables a direct deep-link).
+    pub provider_id: Option<String>,
+    /// Most recent watch activity (for ordering), unix seconds.
+    pub last_watched_at: i64,
+}
+
+/// Remote airing snapshot for one media id, from the batched `media(id_in:)`
+/// `nextAiringEpisode` query. Pure input to the airing-refresh planner.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AiringInfo {
+    pub anilist_id: i64,
+    /// AniList media status ("RELEASING", "FINISHED", "CANCELLED", ...).
+    pub media_status: Option<String>,
+    pub next_episode: Option<i64>,
+    pub airing_at: Option<i64>,
+}
+
+/// A persisted `airing` row: the tracker's local view of when a show's next
+/// episode airs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AiringRow {
+    pub anilist_id: i64,
+    pub next_episode: Option<i64>,
+    pub airing_at: Option<i64>,
+    pub media_status: Option<String>,
+    pub refreshed_at: i64,
+}
+
+/// A `notifications` row for the inbox, joined with media metadata for display.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Notification {
+    pub id: i64,
+    pub anilist_id: i64,
+    pub episode: i64,
+    pub airing_at: Option<i64>,
+    /// Notification kind ("episode" for a released episode).
+    pub kind: String,
+    pub created_at: i64,
+    pub read: bool,
+    pub title_romaji: Option<String>,
+    pub title_english: Option<String>,
+    pub cover_url: Option<String>,
+    /// Provider id when a mapping exists (enables a direct deep-link).
+    pub provider_id: Option<String>,
+}
+
 /// Resume-point row (watch_state table).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatchState {

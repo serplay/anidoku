@@ -103,6 +103,44 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE downloads ADD COLUMN kind TEXT;
     ALTER TABLE downloads ADD COLUMN segments_total INTEGER;
     ",
+    // 005: M3.5 home page + airing tracker & notification inbox.
+    // - home_cache: one JSON blob per section with a 6h TTL (fetched_at),
+    //   for instant offline-tolerant render.
+    // - airing: the tracker's local view of when each tracked show's next
+    //   episode airs (keyed by anilist_id).
+    // - notifications: fired episode releases, de-duped on (anilist_id, episode).
+    // - app_settings: generic kv for UI/behaviour toggles (e.g. notify_planning).
+    "
+    CREATE TABLE home_cache (
+        section    TEXT PRIMARY KEY,
+        json       TEXT NOT NULL,
+        fetched_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE airing (
+        anilist_id   INTEGER PRIMARY KEY,
+        next_episode INTEGER,
+        airing_at    INTEGER,
+        media_status TEXT,
+        refreshed_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE TABLE notifications (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        anilist_id INTEGER NOT NULL,
+        episode    INTEGER NOT NULL,
+        airing_at  INTEGER,
+        kind       TEXT NOT NULL DEFAULT 'episode',
+        created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+        read       INTEGER NOT NULL DEFAULT 0,
+        UNIQUE (anilist_id, episode)
+    );
+
+    CREATE TABLE app_settings (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    ",
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {

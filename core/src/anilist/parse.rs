@@ -1,7 +1,9 @@
 //! Pure JSON shredding for AniList GraphQL responses. No network I/O, so every
 //! function here is unit-tested against captured fixtures.
 
-use crate::models::{MediaInfo, MediaListStatus, RemoteListEntry, Viewer};
+use crate::models::{
+    AiringInfo, HomeMedia, HomeSections, MediaInfo, MediaListStatus, RemoteListEntry, Viewer,
+};
 use crate::{Error, Result};
 use serde_json::Value;
 
@@ -116,6 +118,64 @@ pub fn parse_media_list_collection(v: &Value) -> Result<Vec<RemoteListEntry>> {
     Ok(out)
 }
 
+/// Shred one home-row media object (`Media` with `nextAiringEpisode`).
+pub fn parse_home_media(m: &Value) -> HomeMedia {
+    let title = m.get("title");
+    let airing = m.get("nextAiringEpisode").filter(|a| !a.is_null());
+    HomeMedia {
+        anilist_id: m.get("id").and_then(Value::as_i64).unwrap_or(0),
+        title_romaji: title.and_then(|t| str_field(t, "romaji")),
+        title_english: title.and_then(|t| str_field(t, "english")),
+        cover_url: m.get("coverImage").and_then(|c| str_field(c, "large")),
+        episode_count: m.get("episodes").and_then(Value::as_i64),
+        format: str_field(m, "format"),
+        status: str_field(m, "status"),
+        next_episode: airing.and_then(|a| a.get("episode")).and_then(Value::as_i64),
+        airing_at: airing.and_then(|a| a.get("airingAt")).and_then(Value::as_i64),
+    }
+}
+
+fn parse_home_page(v: &Value, alias: &str) -> Vec<HomeMedia> {
+    v.pointer(&format!("/data/{alias}/media"))
+        .and_then(Value::as_array)
+        .map(|a| a.iter().filter(|m| !m.is_null()).map(parse_home_media).collect())
+        .unwrap_or_default()
+}
+
+/// Shred the three aliased Pages of the home query into `HomeSections`.
+pub fn parse_home_sections(v: &Value) -> Result<HomeSections> {
+    if v.pointer("/data").is_none() {
+        return Err(Error::AniList("home: missing data".into()));
+    }
+    Ok(HomeSections {
+        trending: parse_home_page(v, "trending"),
+        season: parse_home_page(v, "season"),
+        next_season: parse_home_page(v, "next"),
+    })
+}
+
+/// Shred the batched `Page.media[]` airing query into `AiringInfo` rows.
+pub fn parse_airing(v: &Value) -> Result<Vec<AiringInfo>> {
+    let arr = v
+        .pointer("/data/Page/media")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Error::AniList("airing: missing data.Page.media".into()))?;
+    Ok(arr
+        .iter()
+        .filter(|m| !m.is_null())
+        .filter_map(|m| {
+            let anilist_id = m.get("id").and_then(Value::as_i64)?;
+            let airing = m.get("nextAiringEpisode").filter(|a| !a.is_null());
+            Some(AiringInfo {
+                anilist_id,
+                media_status: str_field(m, "status"),
+                next_episode: airing.and_then(|a| a.get("episode")).and_then(Value::as_i64),
+                airing_at: airing.and_then(|a| a.get("airingAt")).and_then(Value::as_i64),
+            })
+        })
+        .collect())
+}
+
 /// Return the server-side `updatedAt` from a `SaveMediaListEntry` response.
 pub fn parse_save_response(v: &Value) -> Result<i64> {
     v.pointer("/data/SaveMediaListEntry/updatedAt")
@@ -197,6 +257,64 @@ mod tests {
     fn save_response_returns_updated_at() {
         let v = json!({"data":{"SaveMediaListEntry":{"id":9,"status":"CURRENT","progress":3,"updatedAt":1712345678}}});
         assert_eq!(parse_save_response(&v).unwrap(), 1712345678);
+    }
+
+    #[test]
+    fn home_sections_parse_all_three_rows() {
+        // Shape captured live from graphql.anilist.co (2026-07).
+        let v = json!({"data":{
+            "trending":{"media":[
+                {"id":177699,"title":{"romaji":"Koukaku Kidoutai","english":"THE GHOST IN THE SHELL"},
+                 "coverImage":{"large":"http://c/177699.png"},"episodes":null,"format":"TV",
+                 "status":"RELEASING","nextAiringEpisode":{"episode":3,"airingAt":1784642400}}
+            ]},
+            "season":{"media":[
+                {"id":21,"title":{"romaji":"ONE PIECE","english":"ONE PIECE"},
+                 "coverImage":{"large":"http://c/21.jpg"},"episodes":null,"format":"TV",
+                 "status":"RELEASING","nextAiringEpisode":{"episode":1170,"airingAt":1784470560}}
+            ]},
+            "next":{"media":[
+                {"id":900,"title":{"romaji":"Future Show","english":null},
+                 "coverImage":{"large":"http://c/900.jpg"},"episodes":12,"format":"TV",
+                 "status":"NOT_YET_RELEASED","nextAiringEpisode":null}
+            ]}
+        }});
+        let s = parse_home_sections(&v).unwrap();
+        assert_eq!(s.trending.len(), 1);
+        assert_eq!(s.trending[0].anilist_id, 177699);
+        assert_eq!(s.trending[0].next_episode, Some(3));
+        assert_eq!(s.trending[0].airing_at, Some(1784642400));
+        assert_eq!(s.season[0].anilist_id, 21);
+        assert_eq!(s.next_season[0].anilist_id, 900);
+        // NOT_YET_RELEASED show with null airing → no caption fields.
+        assert_eq!(s.next_season[0].next_episode, None);
+        assert_eq!(s.next_season[0].status.as_deref(), Some("NOT_YET_RELEASED"));
+    }
+
+    #[test]
+    fn home_sections_tolerates_missing_pages() {
+        let v = json!({"data":{"trending":{"media":[]}}});
+        let s = parse_home_sections(&v).unwrap();
+        assert!(s.trending.is_empty() && s.season.is_empty() && s.next_season.is_empty());
+        assert!(parse_home_sections(&json!({"errors":[]})).is_err());
+    }
+
+    #[test]
+    fn airing_parses_releasing_and_finished() {
+        // Captured live: FINISHED → null nextAiringEpisode; RELEASING → set.
+        let v = json!({"data":{"Page":{"media":[
+            {"id":1,"status":"FINISHED","episodes":26,"nextAiringEpisode":null},
+            {"id":21,"status":"RELEASING","episodes":null,
+             "nextAiringEpisode":{"episode":1170,"airingAt":1784470560}}
+        ]}}});
+        let a = parse_airing(&v).unwrap();
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[0].anilist_id, 1);
+        assert_eq!(a[0].media_status.as_deref(), Some("FINISHED"));
+        assert_eq!(a[0].next_episode, None);
+        assert_eq!(a[1].anilist_id, 21);
+        assert_eq!(a[1].next_episode, Some(1170));
+        assert_eq!(a[1].airing_at, Some(1784470560));
     }
 
     #[test]

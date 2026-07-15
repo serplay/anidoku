@@ -5,6 +5,7 @@
 //! the streaming proxy that injects referer headers for the webview player,
 //! and subtitle conversion.
 
+pub mod airing;
 pub mod anilist;
 pub mod db;
 pub mod downloads;

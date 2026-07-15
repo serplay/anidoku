@@ -7,7 +7,7 @@
 //! scored by title similarity with an episode-count sanity check. Kept pure so
 //! the heuristic is unit-testable against fixed candidate sets.
 
-use crate::models::MediaInfo;
+use crate::models::{AnimeSummary, MediaInfo};
 
 /// Normalize a title for comparison: lowercase, strip season/part suffixes and
 /// punctuation, collapse whitespace. Deliberately lossy — it exists to make
@@ -106,9 +106,92 @@ pub fn best_match<'a>(
         .map(|(c, _)| c)
 }
 
+/// Reverse resolution: given an AniList id and a provider's search results,
+/// pick the provider show that resolves to that id. This is the mirror of
+/// `best_match` used by `resolve_provider_for_anilist` (home-page card click).
+///
+/// The exact, free path is the `aniListId` allanime already carries on each
+/// summary — when a candidate advertises the target id, take it. Otherwise fall
+/// back to title similarity (with an episode-count nudge) against `title`,
+/// clearing the same confidence threshold as `best_match` so an unrelated top
+/// hit is left unresolved rather than opened wrongly.
+pub fn best_provider_match<'a>(
+    anilist_id: i64,
+    title: &str,
+    episodes: Option<u32>,
+    candidates: &'a [AnimeSummary],
+) -> Option<&'a AnimeSummary> {
+    // 1. Exact id carried by the provider.
+    if let Some(exact) = candidates.iter().find(|c| c.anilist_id == Some(anilist_id)) {
+        return Some(exact);
+    }
+    // 2. Title-similarity fallback, scored like the forward matcher.
+    const THRESHOLD: f64 = 0.34;
+    candidates
+        .iter()
+        .map(|c| {
+            let mut best = similarity(title, &c.title);
+            if let Some(en) = &c.title_english {
+                best = best.max(similarity(title, en));
+            }
+            if let (Some(q), a) = (episodes, c.available_episodes) {
+                if q > 0 && a > 0 {
+                    if q == a {
+                        best += 0.1;
+                    } else if (q as i64 - a as i64).abs() > 2 {
+                        best -= 0.15;
+                    }
+                }
+            }
+            (c, best.clamp(0.0, 1.1))
+        })
+        .filter(|(_, s)| *s >= THRESHOLD)
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(c, _)| c)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn summary(provider_id: &str, title: &str, eps: u32, anilist_id: Option<i64>) -> AnimeSummary {
+        AnimeSummary {
+            provider_id: provider_id.to_string(),
+            title: title.to_string(),
+            title_english: None,
+            cover_url: None,
+            available_episodes: eps,
+            anilist_id,
+        }
+    }
+
+    #[test]
+    fn provider_match_prefers_exact_carried_id() {
+        let cands = vec![
+            summary("p1", "Some Other Show", 12, Some(999)),
+            summary("p2", "Frieren", 28, Some(154587)),
+        ];
+        let m = best_provider_match(154587, "totally different query", None, &cands).unwrap();
+        assert_eq!(m.provider_id, "p2");
+    }
+
+    #[test]
+    fn provider_match_falls_back_to_title() {
+        // No candidate carries the id → resolve by title similarity.
+        let cands = vec![
+            summary("p1", "Sousou no Frieren", 28, None),
+            summary("p2", "Unrelated Show", 24, None),
+        ];
+        let m = best_provider_match(154587, "Sousou no Frieren", Some(28), &cands).unwrap();
+        assert_eq!(m.provider_id, "p1");
+    }
+
+    #[test]
+    fn provider_match_none_when_nothing_matches() {
+        let cands = vec![summary("p1", "Completely Different", 24, None)];
+        assert!(best_provider_match(154587, "Sousou no Frieren", Some(28), &cands).is_none());
+        assert!(best_provider_match(1, "anything", None, &[]).is_none());
+    }
 
     fn media(id: i64, romaji: &str, english: Option<&str>, eps: Option<i64>) -> MediaInfo {
         MediaInfo {

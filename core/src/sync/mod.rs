@@ -10,7 +10,7 @@ pub mod conflict;
 pub mod matching;
 
 pub use conflict::{merge, MergeOutcome};
-pub use matching::best_match;
+pub use matching::{best_match, best_provider_match};
 
 /// Exponential backoff for a queued mutation that has failed `attempts` times.
 /// 0 attempts → ready now. Base 5s, doubling, capped at 1 hour.

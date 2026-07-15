@@ -15,12 +15,15 @@
 //! `Error::RateLimited` so the caller (sync worker) can back off.
 
 mod parse;
+pub mod season;
 
 pub use parse::{
-    parse_media_list_collection, parse_media_search, parse_save_response, parse_viewer,
+    parse_airing, parse_home_sections, parse_media_list_collection, parse_media_search,
+    parse_save_response, parse_viewer,
 };
+pub use season::{current_and_next_from_unix, Season};
 
-use crate::models::{MediaInfo, MediaListStatus, RemoteListEntry, Viewer};
+use crate::models::{AiringInfo, HomeSections, MediaInfo, MediaListStatus, RemoteListEntry, Viewer};
 use crate::{Error, Result};
 use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
@@ -60,6 +63,27 @@ const MEDIA_BY_ID_QUERY: &str = "\
 query ($id: Int) { Media(id: $id, type: ANIME) { \
   id episodes format title { romaji english native } synonyms coverImage { large } \
 } }";
+
+/// Home rows: Trending (releasing), Popular This Season, Popular Next Season —
+/// one request, three aliased Pages, verified live against graphql.anilist.co.
+/// `nextAiringEpisode` powers the "Ep N in Xd" caption on airing shows.
+const HOME_QUERY: &str = "\
+query ($season: MediaSeason, $seasonYear: Int, $nextSeason: MediaSeason, $nextYear: Int, $perPage: Int) { \
+  trending: Page(perPage: $perPage) { media(sort: TRENDING_DESC, type: ANIME, status: RELEASING) { \
+    id title { romaji english } coverImage { large } episodes format status \
+    nextAiringEpisode { episode airingAt } } } \
+  season: Page(perPage: $perPage) { media(season: $season, seasonYear: $seasonYear, sort: POPULARITY_DESC, type: ANIME) { \
+    id title { romaji english } coverImage { large } episodes format status \
+    nextAiringEpisode { episode airingAt } } } \
+  next: Page(perPage: $perPage) { media(season: $nextSeason, seasonYear: $nextYear, sort: POPULARITY_DESC, type: ANIME) { \
+    id title { romaji english } coverImage { large } episodes format status \
+    nextAiringEpisode { episode airingAt } } } \
+}";
+
+/// Batched airing lookup for the tracker: one request, up to 50 ids/page.
+const AIRING_QUERY: &str = "\
+query ($ids: [Int]) { Page(perPage: 50) { media(id_in: $ids, type: ANIME) { \
+  id status episodes nextAiringEpisode { episode airingAt } } } }";
 
 /// Payload for a `SaveMediaListEntry` mutation. Serialized into `sync_queue`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -202,6 +226,41 @@ impl AniListClient {
             .post(None, SEARCH_QUERY, json!({ "search": query }))
             .await?;
         parse_media_search(&v)
+    }
+
+    /// Fetch the three home sections in one public (no-auth) request. Compute
+    /// the season/year pair from the current time with `season::current_and_next_from_unix`.
+    pub async fn home_sections(
+        &self,
+        season: Season,
+        season_year: i64,
+        next_season: Season,
+        next_year: i64,
+        per_page: i64,
+    ) -> Result<HomeSections> {
+        let v = self
+            .post(
+                None,
+                HOME_QUERY,
+                json!({
+                    "season": season.as_str(),
+                    "seasonYear": season_year,
+                    "nextSeason": next_season.as_str(),
+                    "nextYear": next_year,
+                    "perPage": per_page,
+                }),
+            )
+            .await?;
+        parse_home_sections(&v)
+    }
+
+    /// Batched `nextAiringEpisode` lookup for the tracker (≤ 50 ids per call).
+    pub async fn airing_for(&self, ids: &[i64]) -> Result<Vec<AiringInfo>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let v = self.post(None, AIRING_QUERY, json!({ "ids": ids })).await?;
+        parse_airing(&v)
     }
 
     pub async fn media_by_id(&self, id: i64) -> Result<Option<MediaInfo>> {

@@ -1,7 +1,10 @@
 mod downloads;
 mod migrations;
 
-use crate::models::{LibraryItem, ListEntry, MediaListStatus, WatchState};
+use crate::models::{
+    AiringRow, ContinueWatchingItem, LibraryItem, ListEntry, MediaListStatus, Notification,
+    WatchState,
+};
 use crate::sync::QueuedMutation;
 use crate::Result;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -427,6 +430,244 @@ impl Database {
         conn.execute("DELETE FROM sync_queue", [])?;
         Ok(())
     }
+
+    // ---- app_settings (generic kv for UI/behaviour toggles) ----
+
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT value FROM app_settings WHERE key = ?1",
+                params![key],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    /// A boolean setting with a default (stored as "1"/"0").
+    pub fn get_bool_setting(&self, key: &str, default: bool) -> Result<bool> {
+        Ok(self
+            .get_setting(key)?
+            .map(|v| v == "1" || v == "true")
+            .unwrap_or(default))
+    }
+
+    pub fn set_bool_setting(&self, key: &str, value: bool) -> Result<()> {
+        self.set_setting(key, if value { "1" } else { "0" })
+    }
+
+    // ---- home_cache (AniList home rows, 6h TTL) ----
+
+    /// The cached JSON + fetch time for a section, if present.
+    pub fn get_home_cache(&self, section: &str) -> Result<Option<(String, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT json, fetched_at FROM home_cache WHERE section = ?1",
+                params![section],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    pub fn put_home_cache(&self, section: &str, json: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO home_cache (section, json, fetched_at) VALUES (?1, ?2, unixepoch())
+             ON CONFLICT(section) DO UPDATE SET json = excluded.json, fetched_at = excluded.fetched_at",
+            params![section, json],
+        )?;
+        Ok(())
+    }
+
+    // ---- continue watching (local CURRENT/REPEATING + watch_state) ----
+
+    /// CURRENT/REPEATING list entries joined with media + provider mapping, plus
+    /// the most-recent watch activity for ordering. Fully local (offline-capable).
+    /// The next-unwatched episode is `progress + 1`, computed by the caller.
+    pub fn continue_watching(&self) -> Result<Vec<ContinueWatchingItem>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT le.anilist_id, le.progress,
+                    mc.title_romaji, mc.title_english, mc.cover_url, mc.episode_count,
+                    a.provider_id,
+                    COALESCE((SELECT MAX(ws.updated_at) FROM watch_state ws
+                              WHERE ws.anime_id = a.provider_id), le.local_updated_at)
+             FROM list_entries le
+             LEFT JOIN media_cache mc ON mc.anilist_id = le.anilist_id
+             LEFT JOIN anime a ON a.anilist_id = le.anilist_id
+             WHERE le.status IN ('CURRENT','REPEATING')
+             ORDER BY 8 DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                let episode_count: Option<i64> = r.get(5)?;
+                let progress: i64 = r.get(1)?;
+                // Next unwatched episode = progress + 1, unless already complete.
+                let next_episode = match episode_count {
+                    Some(total) if total > 0 && progress >= total => None,
+                    _ => Some((progress + 1).to_string()),
+                };
+                Ok(ContinueWatchingItem {
+                    anilist_id: r.get(0)?,
+                    progress,
+                    title_romaji: r.get(2)?,
+                    title_english: r.get(3)?,
+                    cover_url: r.get(4)?,
+                    episode_count,
+                    provider_id: r.get(6)?,
+                    next_episode,
+                    last_watched_at: r.get(7)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    // ---- airing tracker ----
+
+    /// AniList ids of shows to track: CURRENT/REPEATING always, plus PLANNING
+    /// when `include_planning` is set (the Settings toggle).
+    pub fn tracked_anilist_ids(&self, include_planning: bool) -> Result<Vec<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let sql = if include_planning {
+            "SELECT anilist_id FROM list_entries WHERE status IN ('CURRENT','REPEATING','PLANNING')"
+        } else {
+            "SELECT anilist_id FROM list_entries WHERE status IN ('CURRENT','REPEATING')"
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt
+            .query_map([], |r| r.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn upsert_airing(&self, row: &AiringRow) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO airing (anilist_id, next_episode, airing_at, media_status, refreshed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(anilist_id) DO UPDATE SET
+               next_episode = excluded.next_episode,
+               airing_at = excluded.airing_at,
+               media_status = excluded.media_status,
+               refreshed_at = excluded.refreshed_at",
+            params![
+                row.anilist_id,
+                row.next_episode,
+                row.airing_at,
+                row.media_status,
+                row.refreshed_at
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_airing(&self, anilist_id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM airing WHERE anilist_id = ?1", params![anilist_id])?;
+        Ok(())
+    }
+
+    pub fn all_airing(&self) -> Result<Vec<AiringRow>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT anilist_id, next_episode, airing_at, media_status, refreshed_at
+             FROM airing ORDER BY airing_at ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(AiringRow {
+                    anilist_id: r.get(0)?,
+                    next_episode: r.get(1)?,
+                    airing_at: r.get(2)?,
+                    media_status: r.get(3)?,
+                    refreshed_at: r.get(4)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    // ---- notifications (inbox) ----
+
+    /// Insert a fired notification. Returns `true` if it was new (de-duped on
+    /// the UNIQUE `(anilist_id, episode)` constraint via INSERT OR IGNORE).
+    pub fn insert_notification(
+        &self,
+        anilist_id: i64,
+        episode: i64,
+        airing_at: Option<i64>,
+        kind: &str,
+    ) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO notifications (anilist_id, episode, airing_at, kind, created_at, read)
+             VALUES (?1, ?2, ?3, ?4, unixepoch(), 0)",
+            params![anilist_id, episode, airing_at, kind],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// All notifications, newest first, joined with media + provider metadata.
+    pub fn notifications(&self) -> Result<Vec<Notification>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT n.id, n.anilist_id, n.episode, n.airing_at, n.kind, n.created_at, n.read,
+                    mc.title_romaji, mc.title_english, mc.cover_url, a.provider_id
+             FROM notifications n
+             LEFT JOIN media_cache mc ON mc.anilist_id = n.anilist_id
+             LEFT JOIN anime a ON a.anilist_id = n.anilist_id
+             ORDER BY n.created_at DESC, n.id DESC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(Notification {
+                    id: r.get(0)?,
+                    anilist_id: r.get(1)?,
+                    episode: r.get(2)?,
+                    airing_at: r.get(3)?,
+                    kind: r.get(4)?,
+                    created_at: r.get(5)?,
+                    read: r.get::<_, i64>(6)? != 0,
+                    title_romaji: r.get(7)?,
+                    title_english: r.get(8)?,
+                    cover_url: r.get(9)?,
+                    provider_id: r.get(10)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    pub fn unread_notification_count(&self) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.query_row("SELECT count(*) FROM notifications WHERE read = 0", [], |r| r.get(0))?)
+    }
+
+    pub fn mark_all_notifications_read(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("UPDATE notifications SET read = 1 WHERE read = 0", [])?;
+        Ok(())
+    }
+
+    pub fn clear_notifications(&self) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM notifications", [])?;
+        Ok(())
+    }
 }
 
 fn now() -> i64 {
@@ -614,6 +855,102 @@ mod tests {
         db.link_provider_anilist("provB", 42).unwrap();
         assert_eq!(db.provider_id_for_anilist(42).unwrap().as_deref(), Some("provA"));
         assert_eq!(db.anilist_id_for_provider("provB").unwrap(), None);
+    }
+
+    #[test]
+    fn home_cache_roundtrip() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(db.get_home_cache("trending").unwrap().is_none());
+        db.put_home_cache("trending", "[{\"a\":1}]").unwrap();
+        let (json, fetched) = db.get_home_cache("trending").unwrap().unwrap();
+        assert_eq!(json, "[{\"a\":1}]");
+        assert!(fetched > 0);
+        // Overwrite replaces the blob.
+        db.put_home_cache("trending", "[]").unwrap();
+        assert_eq!(db.get_home_cache("trending").unwrap().unwrap().0, "[]");
+    }
+
+    #[test]
+    fn bool_setting_roundtrip_with_default() {
+        let db = Database::open_in_memory().unwrap();
+        // Unset → default.
+        assert!(!db.get_bool_setting("notify_planning", false).unwrap());
+        assert!(db.get_bool_setting("notify_planning", true).unwrap());
+        db.set_bool_setting("notify_planning", true).unwrap();
+        assert!(db.get_bool_setting("notify_planning", false).unwrap());
+        db.set_bool_setting("notify_planning", false).unwrap();
+        assert!(!db.get_bool_setting("notify_planning", true).unwrap());
+    }
+
+    #[test]
+    fn notifications_dedupe_and_unread() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(db.insert_notification(100, 3, Some(5000), "episode").unwrap());
+        // Same (anilist_id, episode) is a no-op (de-dupe) — false.
+        assert!(!db.insert_notification(100, 3, Some(5000), "episode").unwrap());
+        // A different episode fires.
+        assert!(db.insert_notification(100, 4, Some(6000), "episode").unwrap());
+        assert_eq!(db.unread_notification_count().unwrap(), 2);
+        assert_eq!(db.notifications().unwrap().len(), 2);
+        db.mark_all_notifications_read().unwrap();
+        assert_eq!(db.unread_notification_count().unwrap(), 0);
+        db.clear_notifications().unwrap();
+        assert_eq!(db.notifications().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn airing_upsert_and_tracked_ids() {
+        let db = Database::open_in_memory().unwrap();
+        db.set_list_entry_local(100, MediaListStatus::Current, 1, None).unwrap();
+        db.set_list_entry_local(200, MediaListStatus::Planning, 0, None).unwrap();
+        db.set_list_entry_local(300, MediaListStatus::Completed, 12, None).unwrap();
+        let mut ids = db.tracked_anilist_ids(false).unwrap();
+        ids.sort();
+        assert_eq!(ids, vec![100]); // only CURRENT/REPEATING
+        let mut ids = db.tracked_anilist_ids(true).unwrap();
+        ids.sort();
+        assert_eq!(ids, vec![100, 200]); // + PLANNING
+
+        let row = AiringRow {
+            anilist_id: 100,
+            next_episode: Some(2),
+            airing_at: Some(9000),
+            media_status: Some("RELEASING".into()),
+            refreshed_at: 1,
+        };
+        db.upsert_airing(&row).unwrap();
+        assert_eq!(db.all_airing().unwrap().len(), 1);
+        // Upsert advances the same row.
+        db.upsert_airing(&AiringRow { next_episode: Some(3), ..row.clone() }).unwrap();
+        let all = db.all_airing().unwrap();
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].next_episode, Some(3));
+        db.delete_airing(100).unwrap();
+        assert!(db.all_airing().unwrap().is_empty());
+    }
+
+    #[test]
+    fn continue_watching_lists_current_with_next_episode() {
+        let db = Database::open_in_memory().unwrap();
+        db.cache_anime("prov1", "Frieren", None, None, Some(28)).unwrap();
+        db.link_provider_anilist("prov1", 154587).unwrap();
+        db.upsert_media(154587, Some("Sousou no Frieren"), Some("Frieren"), None, Some(28), Some("TV"))
+            .unwrap();
+        db.set_list_entry_local(154587, MediaListStatus::Current, 5, None).unwrap();
+        // A completed show must not appear.
+        db.set_list_entry_local(999, MediaListStatus::Completed, 12, None).unwrap();
+
+        let cw = db.continue_watching().unwrap();
+        assert_eq!(cw.len(), 1);
+        assert_eq!(cw[0].anilist_id, 154587);
+        assert_eq!(cw[0].progress, 5);
+        assert_eq!(cw[0].next_episode.as_deref(), Some("6")); // progress + 1
+        assert_eq!(cw[0].provider_id.as_deref(), Some("prov1"));
+
+        // A show watched to the finale has no next episode.
+        db.set_list_entry_local(154587, MediaListStatus::Current, 28, None).unwrap();
+        let cw = db.continue_watching().unwrap();
+        assert_eq!(cw[0].next_episode, None);
     }
 
     #[test]
