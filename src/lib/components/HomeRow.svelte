@@ -49,7 +49,10 @@
 		grid-auto-flow: column;
 		grid-auto-columns: 150px;
 		gap: var(--space-md);
+		/* Horizontal only — overflow-y must be hidden or the row becomes a
+		   vertical scroll container and captures page scrolling. */
 		overflow-x: auto;
+		overflow-y: hidden;
 		padding-bottom: var(--space-xs);
 		scrollbar-width: thin;
 		scroll-snap-type: x proximity;
