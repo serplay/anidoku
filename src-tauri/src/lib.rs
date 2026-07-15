@@ -7,6 +7,8 @@ mod airing;
 mod android;
 mod auth;
 mod commands;
+#[cfg(target_os = "ios")]
+mod ios;
 mod stream;
 mod sync;
 
@@ -114,7 +116,7 @@ pub fn run() {
     let state = AppState::new(dl_tx);
     let proxy = state.proxy.clone();
     let downloads = state.downloads.clone();
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", target_os = "ios"))]
     let dl_db = state.db.clone();
 
     tauri::Builder::default()
@@ -141,9 +143,10 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 downloads.start();
-                // Android: hold a foreground service while rows are queued or
-                // downloading, so the OS doesn't kill the engine off-screen.
-                #[cfg(target_os = "android")]
+                // Mobile: keep the process (and the download engine inside it)
+                // alive off-screen while rows are queued or downloading —
+                // Android via a foreground service, iOS via a background task.
+                #[cfg(any(target_os = "android", target_os = "ios"))]
                 let mut fg_active = false;
                 while let Some(ev) = dl_rx.recv().await {
                     match ev {
@@ -152,12 +155,15 @@ pub fn run() {
                         }
                         DownloadEvent::State(s) => {
                             let _ = handle.emit("download:state", s);
-                            #[cfg(target_os = "android")]
+                            #[cfg(any(target_os = "android", target_os = "ios"))]
                             {
                                 let active = dl_db.count_active_downloads().unwrap_or(0) > 0;
                                 if active != fg_active {
                                     fg_active = active;
+                                    #[cfg(target_os = "android")]
                                     android::set_download_service_active(&handle, active);
+                                    #[cfg(target_os = "ios")]
+                                    ios::set_download_active(active);
                                 }
                             }
                         }
