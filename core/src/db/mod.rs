@@ -601,6 +601,40 @@ impl Database {
         Ok(rows)
     }
 
+    /// Upcoming airings for the inbox: every airing row with a known next
+    /// episode, joined with media + provider metadata, soonest first. Reuses
+    /// the `Notification` shape (id = anilist_id; kind = "upcoming").
+    pub fn upcoming(&self) -> Result<Vec<Notification>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT ai.anilist_id, ai.next_episode, ai.airing_at, ai.refreshed_at,
+                    mc.title_romaji, mc.title_english, mc.cover_url, a.provider_id
+             FROM airing ai
+             LEFT JOIN media_cache mc ON mc.anilist_id = ai.anilist_id
+             LEFT JOIN anime a ON a.anilist_id = ai.anilist_id
+             WHERE ai.next_episode IS NOT NULL AND ai.airing_at IS NOT NULL
+             ORDER BY ai.airing_at ASC",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(Notification {
+                    id: r.get(0)?, // anilist_id doubles as a stable key
+                    anilist_id: r.get(0)?,
+                    episode: r.get(1)?,
+                    airing_at: r.get(2)?,
+                    kind: "upcoming".into(),
+                    created_at: r.get(3)?,
+                    read: true,
+                    title_romaji: r.get(4)?,
+                    title_english: r.get(5)?,
+                    cover_url: r.get(6)?,
+                    provider_id: r.get(7)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
     // ---- notifications (inbox) ----
 
     /// Insert a fired notification. Returns `true` if it was new (de-duped on

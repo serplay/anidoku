@@ -2,6 +2,7 @@
 //! the Svelte UI over Tauri IPC, and registers the `stream://` proxy protocol
 //! that lets the webview player fetch referer-gated media.
 
+mod airing;
 mod auth;
 mod commands;
 mod stream;
@@ -91,6 +92,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(state)
         // `stream://` now serves cover images only (referer-gated thumbnails);
         // all playback media goes through the loopback HTTP media server.
@@ -101,6 +103,11 @@ pub fn run() {
             // Background AniList sync worker: startup pull + periodic drain/pull.
             // No-ops while logged out, so it is always safe to spawn.
             sync::spawn_worker(app.handle().clone());
+
+            // Airing tracker: startup refresh (catches airings missed while
+            // closed), 60s due-check ticker, 6h re-fetch. Public GraphQL, so
+            // it works logged-out too (tracked set is just empty then).
+            airing::spawn_worker(app.handle().clone());
 
             // Download engine: recover in-flight rows, start the scheduler,
             // and forward engine events to the UI (same pattern as sync.rs).
@@ -150,6 +157,18 @@ pub fn run() {
             commands::delete_completed_downloads,
             commands::download_storage,
             commands::get_offline_info,
+            commands::get_home_cached,
+            commands::refresh_home,
+            commands::get_continue_watching,
+            commands::resolve_provider_for_anilist,
+            commands::get_notifications,
+            commands::get_upcoming,
+            commands::unread_notifications,
+            commands::mark_notifications_read,
+            commands::clear_notifications,
+            commands::airing_refresh_now,
+            commands::get_notify_planning,
+            commands::set_notify_planning,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AniDoku")

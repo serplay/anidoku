@@ -221,6 +221,13 @@ pub async fn pull(app: &AppHandle) -> Result<(), String> {
 
     let _ = app.emit("sync:updated", ());
     drain(app).await;
+
+    // The list just changed — refresh the airing tracker so newly-watching
+    // shows are tracked (and dropped shows untracked) without waiting 6h.
+    let app2 = app.clone();
+    tauri::async_runtime::spawn(async move {
+        crate::airing::refresh(&app2).await;
+    });
     Ok(())
 }
 

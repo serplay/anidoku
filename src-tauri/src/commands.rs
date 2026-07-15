@@ -2,13 +2,16 @@
 //! core crate; all real logic lives in `anidoku-core`.
 
 use crate::{auth, AppState};
+use anidoku_core::airing::{is_fresh, HOME_TTL_SECS};
+use anidoku_core::anilist::current_and_next_from_unix;
 use anidoku_core::downloads as downloads_core;
 use anidoku_core::models::{
-    AnimeStorage, AnimeSummary, DownloadRow, DownloadState, LibraryItem, ListEntry, MediaInfo,
-    MediaListStatus, StreamKind, TranslationType, VideoSource, Viewer, WatchState,
+    AnimeStorage, AnimeSummary, ContinueWatchingItem, DownloadRow, DownloadState,
+    HomeSections, LibraryItem, ListEntry, MediaInfo, MediaListStatus, Notification, StreamKind,
+    TranslationType, VideoSource, Viewer, WatchState,
 };
 use anidoku_core::provider::Provider;
-use anidoku_core::sync::best_match;
+use anidoku_core::sync::{best_match, best_provider_match};
 use serde::Serialize;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
@@ -495,4 +498,200 @@ pub fn get_offline_info(
         video: manifest.video,
         subtitles: manifest.subtitles,
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Home page + airing tracker & notification inbox (M3.5)
+// ---------------------------------------------------------------------------
+
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// The three AniList home rows plus cache bookkeeping so the UI can render
+/// instantly from cache and decide whether to refresh in the background.
+#[derive(Serialize)]
+pub struct HomePayload {
+    pub sections: HomeSections,
+    pub fetched_at: i64,
+    /// False when past the 6h TTL — the UI should kick a background refresh.
+    pub fresh: bool,
+}
+
+const HOME_CACHE_SECTION: &str = "home"; // one blob for all three rows
+
+/// Cached home rows (instant, offline-tolerant). `None` when never fetched.
+#[tauri::command]
+pub fn get_home_cached(state: State<'_, AppState>) -> CmdResult<Option<HomePayload>> {
+    let Some((json, fetched_at)) = state.db.get_home_cache(HOME_CACHE_SECTION).map_err(map_err)?
+    else {
+        return Ok(None);
+    };
+    let sections: HomeSections = serde_json::from_str(&json).map_err(map_err)?;
+    Ok(Some(HomePayload {
+        sections,
+        fetched_at,
+        fresh: is_fresh(fetched_at, now(), HOME_TTL_SECS),
+    }))
+}
+
+/// Fetch the home rows live (one batched public GraphQL request), cache, and
+/// return them. Also warms `media_cache` so home cards resolve titles/covers
+/// elsewhere (inbox, library) without extra requests.
+#[tauri::command]
+pub async fn refresh_home(state: State<'_, AppState>) -> CmdResult<HomePayload> {
+    let ((season, year), (next_season, next_year)) = current_and_next_from_unix(now());
+    let sections = state
+        .anilist
+        .home_sections(season, year, next_season, next_year, 16)
+        .await
+        .map_err(map_err)?;
+    for m in sections
+        .trending
+        .iter()
+        .chain(sections.season.iter())
+        .chain(sections.next_season.iter())
+    {
+        let _ = state.db.upsert_media(
+            m.anilist_id,
+            m.title_romaji.as_deref(),
+            m.title_english.as_deref(),
+            m.cover_url.as_deref(),
+            m.episode_count,
+            m.format.as_deref(),
+        );
+    }
+    let json = serde_json::to_string(&sections).map_err(map_err)?;
+    state
+        .db
+        .put_home_cache(HOME_CACHE_SECTION, &json)
+        .map_err(map_err)?;
+    Ok(HomePayload {
+        sections,
+        fetched_at: now(),
+        fresh: true,
+    })
+}
+
+/// Continue Watching row: local-only join of CURRENT/REPEATING entries with
+/// media metadata, provider mapping, and last watch activity. Works offline.
+#[tauri::command]
+pub fn get_continue_watching(state: State<'_, AppState>) -> CmdResult<Vec<ContinueWatchingItem>> {
+    state.db.continue_watching().map_err(map_err)
+}
+
+/// Resolve an AniList id to a provider show for deep-linking (home card /
+/// inbox click). Order: existing mapping → provider title-search matched by
+/// the provider-carried aniListId (sync matching, reversed). Returns `None`
+/// when unresolvable so the UI can fall back to `/search?q=title`.
+#[tauri::command]
+pub async fn resolve_provider_for_anilist(
+    state: State<'_, AppState>,
+    anilist_id: i64,
+    title: String,
+    episodes: Option<u32>,
+) -> CmdResult<Option<AnimeSummary>> {
+    // 1. Existing mapping: build a summary from the local anime cache.
+    if let Ok(Some(provider_id)) = state.db.provider_id_for_anilist(anilist_id) {
+        let cached = state.db.get_cached_anime(&provider_id).ok().flatten();
+        let (title_romaji, title_english, cover_url) =
+            cached.unwrap_or((title.clone(), None, None));
+        return Ok(Some(AnimeSummary {
+            provider_id,
+            title: title_romaji,
+            title_english,
+            cover_url,
+            available_episodes: episodes.unwrap_or(0),
+            anilist_id: Some(anilist_id),
+        }));
+    }
+
+    // 2. Provider title search, matched by carried aniListId (else title
+    //    similarity). Persist the discovered mapping for next time.
+    let results = state
+        .provider
+        .search(&title, TranslationType::Sub)
+        .await
+        .map_err(map_err)?;
+    for r in &results {
+        let _ = state.db.cache_anime(
+            &r.provider_id,
+            &r.title,
+            r.title_english.as_deref(),
+            r.cover_url.as_deref(),
+            Some(r.available_episodes),
+        );
+    }
+    let Some(m) = best_provider_match(anilist_id, &title, episodes, &results) else {
+        return Ok(None);
+    };
+    let _ = state.db.link_provider_anilist(&m.provider_id, anilist_id);
+    Ok(Some(m.clone()))
+}
+
+/// Inbox: fired episode notifications, newest first.
+#[tauri::command]
+pub fn get_notifications(state: State<'_, AppState>) -> CmdResult<Vec<Notification>> {
+    state.db.notifications().map_err(map_err)
+}
+
+/// Inbox: upcoming airings (tracked shows with a known next episode), soonest
+/// first. `kind` is "upcoming" and `read` is always true.
+#[tauri::command]
+pub fn get_upcoming(state: State<'_, AppState>) -> CmdResult<Vec<Notification>> {
+    state.db.upcoming().map_err(map_err)
+}
+
+#[tauri::command]
+pub fn unread_notifications(state: State<'_, AppState>) -> CmdResult<i64> {
+    state.db.unread_notification_count().map_err(map_err)
+}
+
+#[tauri::command]
+pub fn mark_notifications_read(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    state.db.mark_all_notifications_read().map_err(map_err)?;
+    let _ = app.emit("notify:read", ());
+    Ok(())
+}
+
+#[tauri::command]
+pub fn clear_notifications(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    state.db.clear_notifications().map_err(map_err)?;
+    let _ = app.emit("notify:read", ());
+    Ok(())
+}
+
+/// Force an airing refresh now (Settings toggle change / inbox pull-to-refresh).
+#[tauri::command]
+pub async fn airing_refresh_now(app: AppHandle) -> CmdResult<()> {
+    crate::airing::refresh(&app).await;
+    Ok(())
+}
+
+/// Whether PLANNING entries are also tracked for airing notifications.
+#[tauri::command]
+pub fn get_notify_planning(state: State<'_, AppState>) -> CmdResult<bool> {
+    state
+        .db
+        .get_bool_setting(crate::airing::NOTIFY_PLANNING_KEY, false)
+        .map_err(map_err)
+}
+
+/// Persist the PLANNING toggle and re-run the airing refresh so the tracked
+/// set updates immediately.
+#[tauri::command]
+pub async fn set_notify_planning(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> CmdResult<()> {
+    state
+        .db
+        .set_bool_setting(crate::airing::NOTIFY_PLANNING_KEY, enabled)
+        .map_err(map_err)?;
+    crate::airing::refresh(&app).await;
+    Ok(())
 }
