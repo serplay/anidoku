@@ -2,6 +2,7 @@
 // without a redundant provider round-trip. Backed by an in-memory rune plus
 // sessionStorage for reload survival.
 
+import { setListEntry } from '$lib/api';
 import type { AnimeSummary, AuthStatus, CatalogFilters, CatalogMedia } from '$lib/api';
 
 const KEY = 'anidoku:anime-cache';
@@ -109,3 +110,31 @@ export function pushToast(message: string, kind: Toast['kind'] = 'info') {
 // Unread notification count for the nav bell badge, updated by the layout's
 // notify:new / notify:read listeners and the inbox page.
 export const notifyState = $state<{ unread: number }>({ unread: 0 });
+
+// Whether an AniList media status means the show has not aired yet, so clicking
+// it must not run provider resolution (there is nothing to stream).
+export function isUnreleasedStatus(status: string | null | undefined): boolean {
+	return status === 'NOT_YET_RELEASED';
+}
+
+// Handle a click on a not-yet-released show: never resolve a stream. Toast that
+// it hasn't aired (with the year when known), and — when signed in — add it to
+// the AniList Planning list so the click still does something useful.
+export async function handleUnreleasedClick(
+	anilistId: number,
+	title: string,
+	seasonYear: number | null
+): Promise<void> {
+	const airs = seasonYear ? ` — airs ${seasonYear}` : '';
+	const name = title || 'This title';
+	if (authState.logged_in) {
+		try {
+			await setListEntry(anilistId, 'PLANNING', 0, null);
+			pushToast(`Not released yet${airs} · added ${name} to Planning`, 'sync');
+			return;
+		} catch {
+			/* fall through to the plain info toast */
+		}
+	}
+	pushToast(`Not released yet${airs}`);
+}

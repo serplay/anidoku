@@ -16,7 +16,14 @@
 		type MediaTag,
 		type AnimeSummary
 	} from '$lib/api';
-	import { rememberAnime, pushToast, catalogState, emptyCatalogFilters } from '$lib/state.svelte';
+	import {
+		rememberAnime,
+		pushToast,
+		catalogState,
+		emptyCatalogFilters,
+		isUnreleasedStatus,
+		handleUnreleasedClick
+	} from '$lib/state.svelte';
 	import SearchInput from '$lib/components/SearchInput.svelte';
 	import Button from '$lib/components/Button.svelte';
 	import AnimeCard from '$lib/components/AnimeCard.svelte';
@@ -192,8 +199,13 @@
 	// deep-link to the detail page (dub preserved as a URL param), otherwise toast.
 	async function open(m: CatalogMedia) {
 		if (resolving[m.anilist_id]) return;
-		resolving = { ...resolving, [m.anilist_id]: true };
 		const title = m.title_english ?? m.title_romaji ?? '';
+		// Not-yet-aired shows have no stream to resolve — don't hit the provider.
+		if (isUnreleasedStatus(m.status)) {
+			await handleUnreleasedClick(m.anilist_id, title, m.season_year);
+			return;
+		}
+		resolving = { ...resolving, [m.anilist_id]: true };
 		try {
 			const summary = await resolveProviderForAnilist(m.anilist_id, title, m.episode_count);
 			if (summary) {

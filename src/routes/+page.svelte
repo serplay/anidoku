@@ -14,7 +14,12 @@
 		type ContinueWatchingItem,
 		type AnimeSummary
 	} from '$lib/api';
-	import { rememberAnime, pushToast } from '$lib/state.svelte';
+	import {
+		rememberAnime,
+		pushToast,
+		isUnreleasedStatus,
+		handleUnreleasedClick
+	} from '$lib/state.svelte';
 	import HomeRow from '$lib/components/HomeRow.svelte';
 	import AnimeCard from '$lib/components/AnimeCard.svelte';
 
@@ -126,7 +131,13 @@
 	// provider search matched by carried aniListId) → detail page. Falls back
 	// to /search?q=title when unresolvable.
 	async function openMedia(m: HomeMedia) {
-		await openAniList(m.anilist_id, m.title_english ?? m.title_romaji ?? '', m.episode_count);
+		const title = m.title_english ?? m.title_romaji ?? '';
+		// Not-yet-aired shows (Upcoming Next Season) have no stream to resolve.
+		if (isUnreleasedStatus(m.status)) {
+			await handleUnreleasedClick(m.anilist_id, title, m.season_year);
+			return;
+		}
+		await openAniList(m.anilist_id, title, m.episode_count);
 	}
 
 	async function openAniList(anilistId: number, title: string, episodes: number | null) {
