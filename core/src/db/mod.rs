@@ -268,8 +268,9 @@ impl Database {
     }
 
     /// Apply a local user edit: set status/progress/score, mark dirty, and bump
-    /// `local_updated_at` to now. Progress is clamped to be monotonic (never
-    /// below the current stored value). Returns the resulting entry.
+    /// `local_updated_at` to now. Explicit edits may DECREASE progress (undoing
+    /// a mis-click); monotonicity is only enforced on the automatic paths
+    /// (`ensure_current` / `mark_watched`), which guard before calling this.
     pub fn set_list_entry_local(
         &self,
         anilist_id: i64,
@@ -278,10 +279,7 @@ impl Database {
         score: Option<f64>,
     ) -> Result<ListEntry> {
         let existing = self.get_list_entry(anilist_id)?;
-        let progress = match &existing {
-            Some(e) => progress.max(e.progress).max(0),
-            None => progress.max(0),
-        };
+        let progress = progress.max(0);
         let remote_updated_at = existing.as_ref().and_then(|e| e.remote_updated_at);
         let entry = ListEntry {
             anilist_id,
@@ -765,19 +763,32 @@ mod tests {
     }
 
     #[test]
-    fn list_entry_local_edit_marks_dirty_and_monotonic_progress() {
+    fn list_entry_local_edit_marks_dirty_and_allows_decrement() {
         let db = Database::open_in_memory().unwrap();
         let e = db
             .set_list_entry_local(154587, MediaListStatus::Current, 5, Some(8.0))
             .unwrap();
         assert!(e.dirty);
         assert_eq!(e.progress, 5);
-        // A lower progress must not regress.
+        // Explicit user edits may decrease progress (undo a mis-click)…
         let e = db
             .set_list_entry_local(154587, MediaListStatus::Current, 3, None)
             .unwrap();
-        assert_eq!(e.progress, 5);
+        assert_eq!(e.progress, 3);
         assert_eq!(e.score, Some(8.0)); // preserved
+        // …but never below zero.
+        let e = db
+            .set_list_entry_local(154587, MediaListStatus::Current, -2, None)
+            .unwrap();
+        assert_eq!(e.progress, 0);
+        // The automatic path stays monotonic: re-watching an episode at or
+        // below current progress is a no-op, above it advances.
+        db.set_list_entry_local(154587, MediaListStatus::Current, 3, None).unwrap();
+        let (_e, changed) = db.ensure_current(154587, 2).unwrap();
+        assert!(!changed);
+        let (e, changed) = db.ensure_current(154587, 4).unwrap();
+        assert!(changed);
+        assert_eq!(e.progress, 4);
     }
 
     #[test]
