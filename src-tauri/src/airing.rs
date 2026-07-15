@@ -44,6 +44,13 @@ pub struct NotifyNew {
 /// Tracks releasing shows, untracks FINISHED/CANCELLED/no-next-episode, and
 /// drops rows for shows that left the tracked statuses.
 pub async fn refresh(app: &AppHandle) {
+    // Fire stored rows that came due since the last tick BEFORE overwriting
+    // them with live data: an episode that aired while the app was closed is
+    // gone from AniList's nextAiringEpisode (it already points at the episode
+    // after), so the stored row is the only evidence it aired. This is the
+    // "missed while closed" catch-up — it must precede the upserts.
+    fire_due(app).await;
+
     let state = app.state::<AppState>();
     let include_planning = state
         .db
