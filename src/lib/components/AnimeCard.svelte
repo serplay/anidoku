@@ -65,6 +65,15 @@
 		{:else if showEpisodes && anime.available_episodes > 0}
 			<span class="badge">{anime.available_episodes} ep</span>
 		{/if}
+		<!-- Full-title tooltip: titles clamp to 2 lines, so long ones cut off.
+		     Anchored inside the cover (position:relative; overflow:hidden) so it
+		     can never escape the card and be clipped by a row's scroll container. -->
+		<div class="tooltip" role="tooltip">
+			<span class="t-main">{display}</span>
+			{#if anime.title !== display}
+				<span class="t-sub">{anime.title}</span>
+			{/if}
+		</div>
 	</div>
 	<div class="meta">
 		<span class="title">{display}</span>
@@ -85,13 +94,6 @@
 			</div>
 		{/if}
 	</div>
-	<!-- Full-title tooltip: card titles clamp to 2 lines, so long ones cut off. -->
-	<div class="tooltip" role="tooltip">
-		<span class="t-main">{display}</span>
-		{#if anime.title !== display}
-			<span class="t-sub">{anime.title}</span>
-		{/if}
-	</div>
 </button>
 
 <style>
@@ -108,22 +110,19 @@
 	}
 	.tooltip {
 		position: absolute;
-		top: 100%;
-		left: 0;
+		left: 6px;
+		right: 6px;
+		bottom: 6px;
 		z-index: 20;
 		display: flex;
 		flex-direction: column;
 		gap: 2px;
-		min-width: 100%;
-		width: max-content;
-		max-width: 260px;
-		background: var(--color-surface-elevated);
+		background: rgba(11, 14, 17, 0.92);
 		border: 1px solid var(--color-hairline);
 		border-radius: var(--radius-md);
 		padding: var(--space-xs) var(--space-sm);
 		opacity: 0;
 		pointer-events: none;
-		transform: translateY(2px);
 		transition: opacity 0.15s ease 0.3s;
 	}
 	.card:hover .tooltip,
