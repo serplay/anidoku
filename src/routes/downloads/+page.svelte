@@ -19,6 +19,7 @@
 	} from '$lib/api';
 	import { pushToast } from '$lib/state.svelte';
 	import Skeleton from '$lib/components/Skeleton.svelte';
+	import ConfirmDialog from '$lib/components/ConfirmDialog.svelte';
 
 	let rows = $state<DownloadRow[]>([]);
 	let storage = $state<DownloadStorage>({ per_anime: [], total_bytes: 0 });
@@ -118,20 +119,52 @@
 		}
 	}
 
-	async function deleteAnime(animeId: string, title: string | null) {
-		await act(async () => {
-			const n = await deleteAnimeDownloads(animeId);
-			pushToast(`Deleted ${n} episode${n === 1 ? '' : 's'} of ${title ?? animeId}`);
-			await load();
-		});
+	// Deleting downloaded files is irreversible, so every delete goes through
+	// a confirm dialog first.
+	let confirm = $state<{ title: string; body: string; action: () => Promise<void> } | null>(null);
+
+	async function runConfirmed() {
+		const c = confirm;
+		confirm = null;
+		if (c) await c.action();
 	}
 
-	async function deleteAllCompleted() {
-		await act(async () => {
-			const n = await deleteCompletedDownloads();
-			pushToast(`Deleted ${n} completed download${n === 1 ? '' : 's'}`);
-			await load();
-		});
+	function askDeleteAnime(animeId: string, title: string | null, count: number) {
+		confirm = {
+			title: `Delete ${title ?? animeId}?`,
+			body: `Removes ${count} downloaded episode${count === 1 ? '' : 's'} from disk.`,
+			action: () =>
+				act(async () => {
+					const n = await deleteAnimeDownloads(animeId);
+					pushToast(`Deleted ${n} episode${n === 1 ? '' : 's'} of ${title ?? animeId}`);
+					await load();
+				})
+		};
+	}
+
+	function askDeleteAllCompleted() {
+		const n = [...completedByAnime.values()].reduce((s, l) => s + l.length, 0);
+		confirm = {
+			title: 'Delete all completed downloads?',
+			body: `Removes ${n} downloaded episode${n === 1 ? '' : 's'} from disk.`,
+			action: () =>
+				act(async () => {
+					const d = await deleteCompletedDownloads();
+					pushToast(`Deleted ${d} completed download${d === 1 ? '' : 's'}`);
+					await load();
+				})
+		};
+	}
+
+	function askDeleteEpisode(r: DownloadRow) {
+		confirm = {
+			title: `Delete episode ${r.episode_number}?`,
+			body: `Removes the downloaded file (${formatBytes(r.bytes_done)}) from disk.`,
+			action: () =>
+				act(async () => {
+					await cancelDownload(r.id);
+				})
+		};
 	}
 
 	function titleOf(r: DownloadRow): string {
@@ -163,7 +196,7 @@
 <div class="head">
 	<h1>Downloads</h1>
 	{#if completedByAnime.size > 0}
-		<button class="danger" onclick={deleteAllCompleted}>Delete all completed</button>
+		<button class="danger" onclick={askDeleteAllCompleted}>Delete all completed</button>
 	{/if}
 </div>
 
@@ -238,7 +271,7 @@
 							storageOf.get(animeId) ?? 0
 						)}
 					</span>
-					<button class="danger small" onclick={() => deleteAnime(animeId, eps[0].title)}>
+					<button class="danger small" onclick={() => askDeleteAnime(animeId, eps[0].title, eps.length)}>
 						Delete show
 					</button>
 				</div>
@@ -258,7 +291,7 @@
 							</button>
 							<span class="num">{r.quality ?? ''}</span>
 							<span class="num">{formatBytes(r.bytes_done)}</span>
-							<button class="gdel" title="Delete episode" onclick={() => act(async () => { await cancelDownload(r.id); })}>
+							<button class="gdel" title="Delete episode" onclick={() => askDeleteEpisode(r)}>
 								✕
 							</button>
 						</div>
@@ -272,6 +305,15 @@
 		<span>Total storage used</span>
 		<span class="num total">{formatBytes(storage.total_bytes)}</span>
 	</div>
+{/if}
+
+{#if confirm}
+	<ConfirmDialog
+		title={confirm.title}
+		body={confirm.body}
+		onconfirm={runConfirmed}
+		oncancel={() => (confirm = null)}
+	/>
 {/if}
 
 <style>
