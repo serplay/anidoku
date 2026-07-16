@@ -15,7 +15,22 @@ use anidoku_core::sync::{best_match, best_provider_match};
 use serde::Serialize;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
+#[cfg(target_os = "ios")]
+use tauri::Manager as _;
+#[cfg(not(target_os = "ios"))]
 use tauri_plugin_opener::OpenerExt;
+
+/// Navigate the given webview from the main thread — wry on iOS requires
+/// UIKit calls to happen there.
+#[cfg(target_os = "ios")]
+fn navigate_on_main_thread(webview: &tauri::WebviewWindow, url: tauri::Url) -> CmdResult<()> {
+    let w = webview.clone();
+    webview
+        .run_on_main_thread(move || {
+            let _ = w.navigate(url);
+        })
+        .map_err(map_err)
+}
 
 /// Search results plus the proxied stream-scheme prefix the UI needs.
 type CmdResult<T> = Result<T, String>;
@@ -194,6 +209,14 @@ pub fn anilist_status(state: State<'_, AppState>) -> CmdResult<AuthStatus> {
 /// system browser to AniList, wait for the token, then fetch + cache the Viewer
 /// and kick off an initial pull. Only public/no-auth work happens in the app
 /// webview — the login itself is in the user's real browser.
+///
+/// iOS is the exception: an external browser backgrounds the app and iOS
+/// suspends it within seconds, killing the loopback listener before AniList
+/// can redirect back. There the auth page is shown in the app's own webview
+/// (the app stays foreground, the listener stays alive) and the webview is
+/// navigated back to the app when the capture finishes. That reload drops
+/// this command's reply; the UI recovers the signed-in state from
+/// `anilist_status` on boot.
 #[tauri::command]
 pub async fn anilist_login(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Viewer> {
     let client_id = state
@@ -206,13 +229,34 @@ pub async fn anilist_login(app: AppHandle, state: State<'_, AppState>) -> CmdRes
     let capture = tauri::async_runtime::spawn(auth::run_loopback_capture(Duration::from_secs(300)));
 
     let url = auth::authorize_url(&client_id);
+
+    #[cfg(target_os = "ios")]
+    let return_url = {
+        let webview = app
+            .get_webview_window("main")
+            .ok_or_else(|| "main window missing".to_string())?;
+        let return_url = webview.url().map_err(map_err)?;
+        let auth_url = tauri::Url::parse(&url).map_err(map_err)?;
+        navigate_on_main_thread(&webview, auth_url)?;
+        return_url
+    };
+
+    #[cfg(not(target_os = "ios"))]
     app.opener()
         .open_url(url, None::<&str>)
         .map_err(|e| format!("could not open browser: {e}"))?;
 
     let captured = capture
         .await
-        .map_err(|e| format!("login task failed: {e}"))??;
+        .map_err(|e| format!("login task failed: {e}"))?;
+
+    // Leave the auth page whether login succeeded or not.
+    #[cfg(target_os = "ios")]
+    if let Some(webview) = app.get_webview_window("main") {
+        let _ = navigate_on_main_thread(&webview, return_url);
+    }
+
+    let captured = captured?;
     state
         .auth
         .save_token(captured.access_token, captured.expires_at);
