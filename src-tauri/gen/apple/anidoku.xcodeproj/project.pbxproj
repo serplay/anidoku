@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		0B505F154F59120B61CACD57 /* DownloadBackgroundTask.swift in Sources */ = {isa = PBXBuildFile; fileRef = E22689C4B34CCE6BA2811B47 /* DownloadBackgroundTask.swift */; };
 		0E681C3721F14BF2DF6D59A3 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CA8B63485824E13B7AEFAD85 /* UIKit.framework */; };
+		1682D08A59E9EEA6A3432D1C /* libapp.a in Resources */ = {isa = PBXBuildFile; fileRef = 43842446078EE2B73D99363D /* libapp.a */; };
 		268F30E15C9BE78885D8E7AE /* CoreGraphics.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 88954570C31AE563C6C9B05F /* CoreGraphics.framework */; };
 		37C02FEE2E562692DEBBC8DC /* QuartzCore.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = C8A8B98952C6A9D8AAF4C68B /* QuartzCore.framework */; };
 		49BE2EF18F8BFC46593F5BB9 /* Metal.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = FA5F573D25CC4EAE28BFF2B2 /* Metal.framework */; };
@@ -29,6 +30,7 @@
 		15D8A639E9B164385635343D /* commands.rs */ = {isa = PBXFileReference; path = commands.rs; sourceTree = "<group>"; };
 		2434E5057F9B81549AB7754C /* Security.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Security.framework; path = System/Library/Frameworks/Security.framework; sourceTree = SDKROOT; };
 		369DDB4B52A7E309CD870B59 /* bindings.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = bindings.h; sourceTree = "<group>"; };
+		43842446078EE2B73D99363D /* libapp.a */ = {isa = PBXFileReference; lastKnownFileType = archive.ar; path = libapp.a; sourceTree = "<group>"; };
 		4AFCBCA167CA8829DF594307 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; path = LaunchScreen.storyboard; sourceTree = "<group>"; };
 		59C480726D7E5F1090913C3E /* main.rs */ = {isa = PBXFileReference; path = main.rs; sourceTree = "<group>"; };
 		64D5470E18CFA1886371D059 /* anidoku_iOS.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = anidoku_iOS.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -70,6 +72,22 @@
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		08153573FACFD479DAB33058 /* arm64 */ = {
+			isa = PBXGroup;
+			children = (
+				0B25F3AFBEDC1A0DE2DD2886 /* debug */,
+			);
+			path = arm64;
+			sourceTree = "<group>";
+		};
+		0B25F3AFBEDC1A0DE2DD2886 /* debug */ = {
+			isa = PBXGroup;
+			children = (
+				43842446078EE2B73D99363D /* libapp.a */,
+			);
+			path = debug;
+			sourceTree = "<group>";
+		};
 		341335C97C32DFFE298886A5 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
@@ -113,6 +131,7 @@
 		57A979CBE0BB6B5328441697 /* Externals */ = {
 			isa = PBXGroup;
 			children = (
+				08153573FACFD479DAB33058 /* arm64 */,
 			);
 			path = Externals;
 			sourceTree = "<group>";
@@ -167,14 +186,7 @@
 			path = ../../src;
 			sourceTree = "<group>";
 		};
-		"TEMP_139BE430-D482-47BE-8C67-063AB440E46C" /* arm64 */ = {
-			isa = PBXGroup;
-			children = (
-			);
-			path = arm64;
-			sourceTree = "<group>";
-		};
-		"TEMP_A418532F-F619-40EF-9622-161710B926D0" /* x86_64 */ = {
+		"TEMP_E8A4FF35-584B-4399-B0BE-D3C925AAE686" /* x86_64 */ = {
 			isa = PBXGroup;
 			children = (
 			);
@@ -242,6 +254,7 @@
 				8D1402F5EAD945C70FA76C83 /* Assets.xcassets in Resources */,
 				4E116B63D3ECDC509C7F42A6 /* LaunchScreen.storyboard in Resources */,
 				B655F8CECA5DA4C9B5C9CCE1 /* assets in Resources */,
+				1682D08A59E9EEA6A3432D1C /* libapp.a in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -267,7 +280,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
-			shellScript = "npm run -- tauri ios xcode-script -v --platform ${PLATFORM_DISPLAY_NAME:?} --sdk-root ${SDKROOT:?} --framework-search-paths \"${FRAMEWORK_SEARCH_PATHS:?}\" --header-search-paths \"${HEADER_SEARCH_PATHS:?}\" --gcc-preprocessor-definitions \"${GCC_PREPROCESSOR_DEFINITIONS:-}\" --configuration ${CONFIGURATION:?} 3 ${ARCHS:?}";
+			shellScript = "npm run -- tauri ios xcode-script -v --platform ${PLATFORM_DISPLAY_NAME:?} --sdk-root ${SDKROOT:?} --framework-search-paths \"${FRAMEWORK_SEARCH_PATHS:?}\" --header-search-paths \"${HEADER_SEARCH_PATHS:?}\" --gcc-preprocessor-definitions \"${GCC_PREPROCESSOR_DEFINITIONS:-}\" --configuration ${CONFIGURATION:?} ${FORCE_COLOR:+--force-color} ${ARCHS:?}";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -368,6 +381,7 @@
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALID_ARCHS = arm64;
+				DEVELOPMENT_TEAM = "99D633Y352";
 			};
 			name = release;
 		};
@@ -462,6 +476,7 @@
 				SDKROOT = iphoneos;
 				TARGETED_DEVICE_FAMILY = "1,2";
 				VALID_ARCHS = arm64;
+				DEVELOPMENT_TEAM = "99D633Y352";
 			};
 			name = debug;
 		};

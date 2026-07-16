@@ -36,6 +36,9 @@
     "targets": "all",
     "icon": [
       "icons/icon.png"
-    ]
+    ],
+    "iOS": {
+      "developmentTeam": "99D633Y352"
+    }
   }
 }

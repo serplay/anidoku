@@ -9,8 +9,9 @@ scraper app is ineligible anyway).
 - **Xcode** (full app, not just Command Line Tools) — provides the iOS SDK,
   `xcodebuild`, and the Simulator. Verified against Xcode 26.6.
 - **CocoaPods** (`brew install cocoapods`) and **XcodeGen**
-  (`brew install xcodegen`) — Tauri regenerates `anidoku.xcodeproj` from
-  `gen/apple/project.yml` on every build.
+  (`brew install xcodegen`). Note: `tauri ios build` does *not* regenerate
+  `anidoku.xcodeproj`; after editing `gen/apple/project.yml`, run
+  `xcodegen generate` inside `gen/apple/` manually.
 - Rust iOS targets:
   `rustup target add aarch64-apple-ios aarch64-apple-ios-sim x86_64-apple-ios`
 - The project is scaffolded already (`npx tauri ios init` was run; the result
@@ -73,14 +74,31 @@ have the IPA:
 - Re-open/refresh weekly (free-provisioning limit), or use a paid account
   (`release-testing` export, 1-year certs) to avoid the weekly refresh.
 
-### Signing note (this machine)
+### Signing note
 
-At the time of writing this Mac has **no code-signing identity**
-(`security find-identity -v -p codesigning` → 0 valid identities) and no Apple
-Developer team configured. Every device/IPA path above therefore cannot be
-completed here without the user first signing into Xcode with an Apple ID
-(Xcode → Settings → Accounts). Only the **Simulator** path works unsigned. This
-is the one genuinely unverified piece of M5 — it needs the user's Apple ID.
+Signing needs an Apple ID added in Xcode → Settings → Accounts (free
+provisioning is enough). The development team ID is set in
+`tauri.conf.json` under `bundle > iOS > developmentTeam` — without it the
+build fails with a "You must set the code signing certificate development
+team ID" warning followed by a script-phase error. Find your team ID with
+`security find-identity -v -p codesigning` (it's the OU of the cert, shown
+by Tauri's warning as "Available certificates: <name> (ID: XXXXXXXXXX)").
+IPA export via `--export-method debugging` is verified working on this
+machine with a free personal team.
+
+### Known build failure: "Arch specified by Xcode was invalid"
+
+If the Rust build phase dies with `Arch specified by Xcode was invalid.
+{arch} isn't a known arch`, an npm-style `FORCE_COLOR=3` env var has leaked
+into xcodebuild and is being parsed as an architecture. cargo-mobile2 uses
+`FORCE_COLOR` to smuggle its `--force-color` flag into the script phase, and
+npm/terminals set the same variable to `1`/`2`/`3`. The script template in
+`gen/apple/project.yml` guards against this with
+`${FORCE_COLOR:+--force-color}` — keep that guard if the project is ever
+re-scaffolded with `tauri ios init`. Note that despite what xcodegen docs
+suggest, `tauri ios build` does **not** regenerate `anidoku.xcodeproj` from
+`project.yml`; after editing `project.yml`, run `xcodegen generate` inside
+`gen/apple/` yourself.
 
 ## iOS-specific pieces (where to look when something breaks)
 
