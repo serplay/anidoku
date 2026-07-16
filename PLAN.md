@@ -35,11 +35,18 @@ Verified on the iOS Simulator: full debug build compiles + links (Rust core for
 launches; the webview UI renders (proving the ATS loopback exemption works for
 the app shell).
 
-Remaining for M5 sign-off (needs hardware/credentials this machine lacks):
+**Signing/IPA export: DONE (2026-07-16, commit 3e51042).** After the user
+added their Apple ID, two fixes were needed: `bundle > iOS > developmentTeam`
+in tauri.conf.json, and a `${FORCE_COLOR:+--force-color}` guard in
+`gen/apple/project.yml` (npm's `FORCE_COLOR=3` leaked into xcodebuild and was
+parsed as an arch — "Arch specified by Xcode was invalid"). A signed debug
+IPA now exports to `gen/apple/build/arm64/AniDoku.ipa`. Details in
+BUILD-IOS.md.
 
-1. **Device sideload + signing**: this Mac has **no code-signing identity** and
-   no Apple Developer team, so device install / IPA export could not be run.
-   Needs the user to sign into Xcode with an Apple ID (see BUILD-IOS.md).
+Remaining for M5 sign-off (needs a physical device):
+
+1. **Device install**: sideload the IPA via AltStore/SideStore or run from
+   Xcode onto a plugged-in iPhone (see BUILD-IOS.md).
 2. **On-device background-download behaviour**: the background-task shim links
    and is wired, but the Simulator does not model real background suspension,
    so its actual effect (and iOS's short grace window vs. Android's unbounded
