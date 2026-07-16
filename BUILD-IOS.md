@@ -123,6 +123,20 @@ suggest, `tauri ios build` does **not** regenerate `anidoku.xcodeproj` from
   Android, which needs `http://stream.localhost`). `streamUrl` in
   `src/lib/api.ts` only rewrites for Android, so iOS falls through to
   `stream://localhost/` correctly.
+- **AniList OAuth**: on desktop the login opens the *external* browser and a
+  one-shot listener on `127.0.0.1:8737` captures the redirect. On iOS an
+  external browser would background the app and iOS suspends it within
+  seconds, killing that listener before AniList redirects back. So on iOS the
+  login command instead navigates the app's **own webview** to the authorize
+  URL (the app stays foreground, the listener stays alive) and navigates back
+  to the app when the capture finishes — see `anilist_login` in
+  `src-tauri/src/commands.rs`. The registered redirect URL is unchanged
+  (`http://127.0.0.1:8737/callback`), covered by the ATS loopback exemption.
+  The in-app page reload drops the command's reply; the UI recovers the
+  signed-in state from `anilist_status` on boot. Verified end-to-end in the
+  Simulator with a real AniList login (Cloudflare check included). Known
+  rough edge: if the user abandons the AniList page there is no in-page way
+  back — the capture times out after 5 minutes and the app returns.
 - **Background downloads**: `Sources/anidoku/DownloadBackgroundTask.swift`
   exposes `anidoku_set_download_active(_:)` via `@_cdecl`; Rust
   (`src-tauri/src/ios.rs`) calls it whenever the queued/downloading row count

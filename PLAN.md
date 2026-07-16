@@ -43,6 +43,12 @@ parsed as an arch — "Arch specified by Xcode was invalid"). A signed debug
 IPA now exports to `gen/apple/build/arm64/AniDoku.ipa`. Details in
 BUILD-IOS.md.
 
+**AniList login on iOS: DONE (2026-07-16).** The desktop flow (external
+browser + loopback capture) dies on iOS because Safari backgrounds the app and
+iOS suspends the listener. The login command now shows the auth page in the
+app's own webview on iOS and navigates back after capture — verified
+end-to-end in the Simulator with a real AniList sign-in. See BUILD-IOS.md.
+
 Remaining for M5 sign-off (needs a physical device):
 
 1. **Device install**: sideload the IPA via AltStore/SideStore or run from
