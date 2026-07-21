@@ -18,12 +18,12 @@ use crate::{Error, Result};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde_json::{json, Value};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub use constants::*;
 
 pub struct AllAnime {
     client: Client,
-    key: [u8; 32],
 }
 
 impl Default for AllAnime {
@@ -32,38 +32,65 @@ impl Default for AllAnime {
     }
 }
 
+/// Per-epoch crypto material for the `episode(...)` query, fetched from the
+/// bootstrap endpoint. `epoch` rotates every few days; `partB` XORed with the
+/// static [`QD_MASK_HEX`] yields the AES-256 key.
+#[derive(serde::Deserialize)]
+struct Bootstrap {
+    epoch: u64,
+    #[serde(rename = "partB")]
+    part_b: String,
+}
+
 impl AllAnime {
     pub fn new() -> Self {
         let client = Client::builder()
             .user_agent(USER_AGENT)
             .build()
             .expect("reqwest client");
-        Self {
-            client,
-            key: decrypt::derive_key(DECRYPT_PASSPHRASE),
-        }
+        Self { client }
     }
 
-    /// GET the persisted episode-sources query. This is ani-cli's primary
-    /// path; the server rejects the equivalent ad-hoc POST for many shows.
+    /// Fetch the current `{ epoch, partB }` used to sign the aaReq token and
+    /// decrypt the episode-sources payload.
+    async fn fetch_bootstrap(&self) -> Result<Bootstrap> {
+        let resp = self
+            .client
+            .get(BOOTSTRAP_URL)
+            .header("Referer", REFERER)
+            .header("Origin", REFERER)
+            .header("x-build-id", BUILD_ID)
+            .send()
+            .await?
+            .error_for_status()?;
+        resp.json::<Bootstrap>()
+            .await
+            .map_err(|e| Error::Provider(format!("sources: bad bootstrap response: {e}")))
+    }
+
+    /// GET the persisted episode-sources query, carrying the signed `aaReq`
+    /// token the server now requires (missing/stale ones yield `AA_CRYPTO_*`
+    /// and, downstream, "sources: missing episode.sourceUrls").
     async fn get_episode_persisted(
         &self,
         show_id: &str,
         episode: &str,
         mode: TranslationType,
+        aa_req: &str,
     ) -> Result<String> {
         let variables = format!(
             r#"{{"showId":"{show_id}","translationType":"{}","episodeString":"{episode}"}}"#,
             mode.as_str()
         );
         let extensions = format!(
-            r#"{{"persistedQuery":{{"version":1,"sha256Hash":"{EPISODE_QUERY_HASH}"}}}}"#
+            r#"{{"persistedQuery":{{"version":1,"sha256Hash":"{EPISODE_QUERY_HASH}"}},"aaReq":"{aa_req}"}}"#
         );
         let resp = self
             .client
             .get(API_URL)
             .header("Referer", REFERER)
             .header("Origin", REFERER)
+            .header("x-build-id", BUILD_ID)
             .query(&[("variables", variables.as_str()), ("extensions", &extensions)])
             .send()
             .await?
@@ -77,6 +104,8 @@ impl AllAnime {
             .client
             .post(API_URL)
             .header("Referer", REFERER)
+            .header("Origin", REFERER)
+            .header("x-build-id", BUILD_ID)
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
@@ -101,11 +130,11 @@ impl AllAnime {
 
     /// The sources GraphQL response may inline the sourceUrls JSON or wrap it
     /// in an encrypted `tobeparsed` blob. Return the plaintext JSON either way.
-    fn unwrap_sources_response(&self, body: &str) -> Result<String> {
+    fn unwrap_sources_response(&self, body: &str, key: &[u8; 32]) -> Result<String> {
         let v: Value = serde_json::from_str(body)
             .map_err(|e| Error::Provider(format!("sources: invalid json envelope: {e}")))?;
         if let Some(tbp) = find_tobeparsed(&v) {
-            decrypt::decrypt_tobeparsed(tbp, &self.key)
+            decrypt::decrypt_tobeparsed(tbp, key)
         } else {
             Ok(body.to_string())
         }
@@ -196,25 +225,24 @@ impl Provider for AllAnime {
         episode: &str,
         mode: TranslationType,
     ) -> Result<Vec<VideoSource>> {
-        // Primary: persisted GET (returns an encrypted `tobeparsed` blob).
-        // Fallback: ad-hoc POST, matching ani-cli's two-step approach.
-        let body = self.get_episode_persisted(show_id, episode, mode).await?;
-        let refs = match self
-            .unwrap_sources_response(&body)
-            .and_then(|j| parse::parse_source_refs(&j))
-        {
-            Ok(refs) if !refs.is_empty() => refs,
-            _ => {
-                let variables = json!({
-                    "showId": show_id,
-                    "translationType": mode.as_str(),
-                    "episodeString": episode
-                });
-                let body = self.post_gql(variables, EPISODE_EMBED_GQL).await?;
-                let json = self.unwrap_sources_response(&body)?;
-                parse::parse_source_refs(&json)?
-            }
-        };
+        // Fetch the per-epoch key and sign the aaReq token, then GET the
+        // persisted query (which returns an encrypted `tobeparsed` blob). The
+        // old ad-hoc POST fallback no longer works — allanime rejects it with
+        // AA_CRYPTO_MISSING — so there is only this one path now.
+        let boot = self.fetch_bootstrap().await?;
+        let key = decrypt::derive_key_xor(&boot.part_b, QD_MASK_HEX)?;
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|e| Error::Provider(format!("sources: system clock before epoch: {e}")))?
+            .as_millis();
+        let aa_req = decrypt::sign_aa_req(&key, boot.epoch, BUILD_ID, EPISODE_QUERY_HASH, now_ms)?;
+
+        let body = self
+            .get_episode_persisted(show_id, episode, mode, &aa_req)
+            .await?;
+        let refs = self
+            .unwrap_sources_response(&body, &key)
+            .and_then(|j| parse::parse_source_refs(&j))?;
 
         // Resolve each embed reference into concrete links, skipping refs
         // that fail rather than aborting the whole set.
@@ -223,10 +251,8 @@ impl Provider for AllAnime {
             tasks.push(self.resolve_ref(r));
         }
         let mut sources = Vec::new();
-        for res in futures_join(tasks).await {
-            if let Ok(mut links) = res {
-                sources.append(&mut links);
-            }
+        for mut links in futures_join(tasks).await.into_iter().flatten() {
+            sources.append(&mut links);
         }
 
         // Order so the default (first) source is one that actually plays in a
@@ -336,6 +362,6 @@ mod tests {
     fn unwrap_sources_passes_through_plain() {
         let a = AllAnime::new();
         let plain = r#"{"data":{"episode":{"sourceUrls":[]}}}"#;
-        assert_eq!(a.unwrap_sources_response(plain).unwrap(), plain);
+        assert_eq!(a.unwrap_sources_response(plain, &[0u8; 32]).unwrap(), plain);
     }
 }

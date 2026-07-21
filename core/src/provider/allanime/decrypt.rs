@@ -2,10 +2,15 @@
 
 use crate::{Error, Result};
 use aes::cipher::{KeyIvInit, StreamCipher};
+use aes_gcm::aead::Aead;
+use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
 type Aes256Ctr = ctr::Ctr128BE<aes::Aes256>;
+
+/// Bucket (ms) the aaReq timestamp is floored to (web client `Dm = 5 * 6e4`).
+const TS_BUCKET_MS: u128 = 5 * 60 * 1000;
 
 /// Deobfuscate an allanime `sourceUrl`.
 ///
@@ -29,9 +34,73 @@ pub fn deobfuscate_source_url(source_url: &str) -> Result<String> {
 }
 
 /// AES-256-CTR key: SHA-256 of the allanime passphrase (ani-cli `$allanime_key`).
+///
+/// This was the whole story until allanime moved to per-epoch bootstrap keys
+/// (see [`derive_key_xor`]). Retained only for the legacy roundtrip test.
+#[cfg(test)]
 pub fn derive_key(passphrase: &str) -> [u8; 32] {
     let digest = Sha256::digest(passphrase.as_bytes());
     digest.into()
+}
+
+/// Derive the current AES-256 key from a bootstrap response: the base64
+/// `partB` XORed byte-for-byte with the static `mask_hex` (`qd` in the web
+/// client). Both are 32 bytes.
+pub fn derive_key_xor(part_b_b64: &str, mask_hex: &str) -> Result<[u8; 32]> {
+    let part_b = base64::engine::general_purpose::STANDARD
+        .decode(part_b_b64.trim())
+        .map_err(|e| Error::Decrypt(format!("bad base64 in bootstrap partB: {e}")))?;
+    let mask =
+        hex::decode(mask_hex).map_err(|e| Error::Decrypt(format!("bad mask hex: {e}")))?;
+    if part_b.len() != 32 || mask.len() != 32 {
+        return Err(Error::Decrypt(format!(
+            "key material wrong length: partB={} mask={}",
+            part_b.len(),
+            mask.len()
+        )));
+    }
+    let mut key = [0u8; 32];
+    for i in 0..32 {
+        key[i] = part_b[i] ^ mask[i];
+    }
+    Ok(key)
+}
+
+/// Sign an `aaReq` token the `episode(...)` GraphQL query now requires.
+///
+/// Mirrors the web client (`Nb`/`Tb`): build a compact JSON payload, derive a
+/// 12-byte nonce as `SHA-256("epoch:buildId:qh:ts")[..12]`, AES-256-GCM encrypt
+/// the payload, and base64 the envelope `0x01 || nonce(12) || ciphertext+tag`.
+/// `now_ms` is floored to a 5-minute bucket so the token stays stable within a
+/// window and the server accepts it as fresh.
+pub fn sign_aa_req(
+    key: &[u8; 32],
+    epoch: u64,
+    build_id: &str,
+    query_hash: &str,
+    now_ms: u128,
+) -> Result<String> {
+    let ts = (now_ms / TS_BUCKET_MS) * TS_BUCKET_MS;
+    // Field order matches the web client's JSON.stringify; the server parses by
+    // key so order is not load-bearing, but keep it identical to be safe.
+    let payload = format!(
+        r#"{{"v":1,"ts":{ts},"epoch":{epoch},"buildId":"{build_id}","qh":"{query_hash}"}}"#
+    );
+
+    let seed = format!("{epoch}:{build_id}:{query_hash}:{ts}");
+    let nonce_bytes = Sha256::digest(seed.as_bytes());
+    let nonce = Nonce::from_slice(&nonce_bytes[..12]);
+
+    let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
+    let ciphertext = cipher
+        .encrypt(nonce, payload.as_bytes())
+        .map_err(|e| Error::Decrypt(format!("aaReq encrypt failed: {e}")))?;
+
+    let mut envelope = Vec::with_capacity(1 + 12 + ciphertext.len());
+    envelope.push(0x01);
+    envelope.extend_from_slice(&nonce_bytes[..12]);
+    envelope.extend_from_slice(&ciphertext);
+    Ok(base64::engine::general_purpose::STANDARD.encode(&envelope))
 }
 
 /// Decrypt a `tobeparsed` payload from the episode-sources API response.
@@ -159,5 +228,55 @@ mod tests {
         let key = derive_key("x");
         let b64 = base64::engine::general_purpose::STANDARD.encode([0u8; 10]);
         assert!(decrypt_tobeparsed(&b64, &key).is_err());
+    }
+
+    #[test]
+    fn derive_key_xor_matches_web_client() {
+        // partB XOR qd from a live bootstrap response (epoch 6884).
+        let key = derive_key_xor(
+            "UNQhzl5g9ARRgv6O25blL+lPqsuRMOJ2EA+mLXX2pWk=",
+            "a39b86dbbcf57f884f3e9074969e7fe26656c74012e4545605896621ffa441c1",
+        )
+        .unwrap();
+        // First byte: 0x50 ('P' in base64-decoded partB) XOR 0xa3 = 0xf3.
+        assert_eq!(key[0], 0x50 ^ 0xa3);
+        assert_eq!(key.len(), 32);
+    }
+
+    #[test]
+    fn derive_key_xor_rejects_bad_lengths() {
+        assert!(derive_key_xor("AAAA", "a39b").is_err());
+    }
+
+    #[test]
+    fn aa_req_envelope_is_gcm_decryptable() {
+        use aes_gcm::aead::Aead;
+        use aes_gcm::{Aes256Gcm, Key, KeyInit, Nonce};
+
+        let key = [7u8; 32];
+        let epoch = 6884u64;
+        let qh = "d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec";
+        // A ts already aligned to the 5-minute bucket, so the token is exact.
+        let now_ms = 1_784_600_000_000u128;
+        let token = sign_aa_req(&key, epoch, "63", qh, now_ms).unwrap();
+
+        // Envelope: 0x01 || nonce(12) || ciphertext+tag. Recover and verify it
+        // decrypts (i.e. the GCM tag is valid) back to the expected payload.
+        let blob = base64::engine::general_purpose::STANDARD
+            .decode(&token)
+            .unwrap();
+        assert_eq!(blob[0], 0x01);
+        let ts = (now_ms / TS_BUCKET_MS) * TS_BUCKET_MS;
+        let expected_nonce = Sha256::digest(format!("{epoch}:63:{qh}:{ts}").as_bytes());
+        assert_eq!(&blob[1..13], &expected_nonce[..12]);
+
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
+        let plaintext = cipher
+            .decrypt(Nonce::from_slice(&blob[1..13]), &blob[13..])
+            .expect("aaReq envelope should authenticate and decrypt");
+        assert_eq!(
+            String::from_utf8(plaintext).unwrap(),
+            format!(r#"{{"v":1,"ts":{ts},"epoch":{epoch},"buildId":"63","qh":"{qh}"}}"#)
+        );
     }
 }
