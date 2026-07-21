@@ -59,6 +59,16 @@ Outputs land under
 and its password out of the repo and backed up — APK updates must be signed
 with the same key or Android refuses to install over the old version.
 
+## App icon
+
+`npx tauri icon <png>` writes the Android launcher set to
+`src-tauri/icons/android/` — it does **not** touch the real project, and
+`tauri android init` seeds `gen/android` with the default Tauri logo. After
+regenerating icons, copy the `mipmap-*` dirs and
+`values/ic_launcher_background.xml` into
+`src-tauri/gen/android/app/src/main/res/` (the adaptive-icon background
+color there is overridden to canvas `#0b0e11`).
+
 ## Android-specific pieces (where to look when something breaks)
 
 - **TLS**: the whole workspace uses `reqwest` with **rustls** — do not
