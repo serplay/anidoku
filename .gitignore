@@ -25,6 +25,17 @@ vite.config.ts.timestamp-*
 # Rust
 /target
 src-tauri/gen/schemas
+*.rs.bk          # rustfmt backups
+*.orig           # merge/patch leftovers
 
 # Tauri build artifacts
 src-tauri/target
+
+# Gradle / Kotlin (Android) — compile caches + crash error logs, wherever they
+# land under gen/android (e.g. buildSrc/). The scoped gen/android/.gitignore
+# also lists these; kept here as a cross-cutting safety net.
+.gradle
+.kotlin
+**/build/
+hs_err_pid*.log   # JVM crash dumps
+*.hprof           # JVM heap dumps
