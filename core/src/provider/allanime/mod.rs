@@ -42,6 +42,26 @@ struct Bootstrap {
     part_b: String,
 }
 
+/// Client-computed epoch candidates for the `x-aa-boot` signature, mirroring the
+/// web client's `[qS(), zh()]`: the current 3-day bucket (`zh`), plus the
+/// previous one while still inside the new bucket's first day (`qS`, a grace
+/// window for freshly rotated epochs). Deduped, tried in candidate order.
+fn epoch_candidates(now_ms: u128) -> Vec<u64> {
+    // web client `US = 864e5` (1 day)
+    const GRACE_MS: u128 = 86_400_000;
+    let zh = (now_ms / EPOCH_BUCKET_MS) as u64;
+    let qs = if zh > 0 && now_ms - (zh as u128) * EPOCH_BUCKET_MS < GRACE_MS {
+        zh - 1
+    } else {
+        zh
+    };
+    if qs == zh {
+        vec![zh]
+    } else {
+        vec![qs, zh]
+    }
+}
+
 impl AllAnime {
     pub fn new() -> Self {
         let client = Client::builder()
@@ -53,19 +73,41 @@ impl AllAnime {
 
     /// Fetch the current `{ epoch, partB }` used to sign the aaReq token and
     /// decrypt the episode-sources payload.
-    async fn fetch_bootstrap(&self) -> Result<Bootstrap> {
-        let resp = self
-            .client
-            .get(BOOTSTRAP_URL)
-            .header("Referer", REFERER)
-            .header("Origin", REFERER)
-            .header("x-build-id", BUILD_ID)
-            .send()
-            .await?
-            .error_for_status()?;
-        resp.json::<Bootstrap>()
-            .await
-            .map_err(|e| Error::Provider(format!("sources: bad bootstrap response: {e}")))
+    ///
+    /// The endpoint now gates on a per-content `lane` (`?k=`) and a signed
+    /// `x-aa-boot` header keyed by a client-computed epoch (3-day buckets). We
+    /// try the current bucket and — inside its first day — the previous one
+    /// (matching the web client's `[qS(), zh()]` candidate list), and take the
+    /// first that authenticates. The response echoes the authoritative epoch.
+    async fn fetch_bootstrap(&self, lane: &str, now_ms: u128) -> Result<Bootstrap> {
+        let mut last_err: Option<Error> = None;
+        for epoch in epoch_candidates(now_ms) {
+            let aa_boot =
+                decrypt::sign_aa_boot(QD_MASK_HEX, BUILD_ID, KEY_GROUP, REFERER_HOST, epoch, lane)?;
+            let resp = self
+                .client
+                .get(BOOTSTRAP_URL)
+                .header("Referer", REFERER)
+                .header("Origin", REFERER)
+                .header("x-build-id", BUILD_ID)
+                .header("x-aa-boot", aa_boot)
+                .query(&[("buildId", BUILD_ID), ("k", lane)])
+                .send()
+                .await?;
+            if !resp.status().is_success() {
+                last_err = Some(Error::Provider(format!(
+                    "sources: bootstrap rejected epoch {epoch} ({})",
+                    resp.status()
+                )));
+                continue;
+            }
+            return resp
+                .json::<Bootstrap>()
+                .await
+                .map_err(|e| Error::Provider(format!("sources: bad bootstrap response: {e}")));
+        }
+        Err(last_err
+            .unwrap_or_else(|| Error::Provider("sources: bootstrap: no epoch candidates".into())))
     }
 
     /// GET the persisted episode-sources query, carrying the signed `aaReq`
@@ -83,7 +125,7 @@ impl AllAnime {
             mode.as_str()
         );
         let extensions = format!(
-            r#"{{"persistedQuery":{{"version":1,"sha256Hash":"{EPISODE_QUERY_HASH}"}},"aaReq":"{aa_req}"}}"#
+            r#"{{"persistedQuery":{{"version":1,"sha256Hash":"{EPISODE_QUERY_HASH}"}},"k":"{EPISODE_LANE}","aaReq":"{aa_req}"}}"#
         );
         let resp = self
             .client
@@ -91,7 +133,10 @@ impl AllAnime {
             .header("Referer", REFERER)
             .header("Origin", REFERER)
             .header("x-build-id", BUILD_ID)
-            .query(&[("variables", variables.as_str()), ("extensions", &extensions)])
+            .query(&[
+                ("variables", variables.as_str()),
+                ("extensions", &extensions),
+            ])
             .send()
             .await?
             .error_for_status()?;
@@ -229,13 +274,20 @@ impl Provider for AllAnime {
         // persisted query (which returns an encrypted `tobeparsed` blob). The
         // old ad-hoc POST fallback no longer works — allanime rejects it with
         // AA_CRYPTO_MISSING — so there is only this one path now.
-        let boot = self.fetch_bootstrap().await?;
-        let key = decrypt::derive_key_xor(&boot.part_b, QD_MASK_HEX)?;
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| Error::Provider(format!("sources: system clock before epoch: {e}")))?
             .as_millis();
-        let aa_req = decrypt::sign_aa_req(&key, boot.epoch, BUILD_ID, EPISODE_QUERY_HASH, now_ms)?;
+        let boot = self.fetch_bootstrap(EPISODE_LANE, now_ms).await?;
+        let key = decrypt::derive_key_xor(&boot.part_b, QD_MASK_HEX)?;
+        let aa_req = decrypt::sign_aa_req(
+            &key,
+            boot.epoch,
+            BUILD_ID,
+            EPISODE_QUERY_HASH,
+            EPISODE_LANE,
+            now_ms,
+        )?;
 
         let body = self
             .get_episode_persisted(show_id, episode, mode, &aa_req)
@@ -275,6 +327,17 @@ impl AllAnime {
         // Direct-download hosts (ani-cli's fast4speed/Yt case) are already
         // playable and need no clock indirection.
         if r.url.starts_with("http://") || r.url.starts_with("https://") {
+            // Many allanime "sources" are HTML *embed* player pages, not media
+            // files — a webview <video> can't play them. Resolve the hosts we
+            // understand into direct media so they become real, top-ranked
+            // sources instead of rank-2 dead ends. On a miss (unknown host, or a
+            // known one whose page yielded nothing — deleted/region-locked) we
+            // fall through and return the URL as-is, so nothing regresses.
+            if let Some(links) = self.resolve_embed(&r.url, &r.name).await {
+                if !links.is_empty() {
+                    return Ok(links);
+                }
+            }
             let kind = if r.url.contains(".m3u8") {
                 crate::models::StreamKind::Hls
             } else {
@@ -295,7 +358,175 @@ impl AllAnime {
             return Ok(Vec::new());
         }
         let clock_body = self.fetch_clock(&path).await?;
-        Ok(parse::parse_clock_links(&clock_body, &r.name, Some(REFERER)))
+        Ok(parse::parse_clock_links(
+            &clock_body,
+            &r.name,
+            Some(REFERER),
+        ))
+    }
+
+    /// Dispatch a direct embed URL to a host-specific extractor. Returns `None`
+    /// for hosts we don't handle (streamsb is a dead ad-parked domain,
+    /// streamlare walls every endpoint behind an anti-adblock shell — neither is
+    /// extractable server-side), and `Some(vec![])` when a known host yielded
+    /// nothing. Both cases leave [`resolve_ref`] to fall back to the raw URL.
+    async fn resolve_embed(&self, url: &str, name: &str) -> Option<Vec<VideoSource>> {
+        if url.contains("mp4upload.com") {
+            return Some(self.extract_mp4upload(url, name).await.unwrap_or_default());
+        }
+        if url.contains("ok.ru") || url.contains("odnoklassniki") {
+            return Some(self.extract_okru(url, name).await.unwrap_or_default());
+        }
+        None
+    }
+
+    /// Fetch an mp4upload embed page and pull the direct `/d/…/video.mp4` URL
+    /// out of its `player.src({...})` call. Empty on a deleted file / layout
+    /// change. The page host gates the fetch on the `www.` referer, same as the
+    /// media file itself, which is why the source carries [`MP4UPLOAD_REFERER`].
+    async fn extract_mp4upload(&self, embed_url: &str, name: &str) -> Result<Vec<VideoSource>> {
+        let body = self
+            .client
+            .get(embed_url)
+            .header("Referer", MP4UPLOAD_REFERER)
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        Ok(find_player_src(&body)
+            .map(|src| {
+                vec![VideoSource {
+                    provider_name: name.to_string(),
+                    quality: "auto".into(),
+                    url: src.to_string(),
+                    kind: crate::models::StreamKind::Mp4,
+                    referer: Some(MP4UPLOAD_REFERER.to_string()),
+                    subtitles: Vec::new(),
+                }]
+            })
+            .unwrap_or_default())
+    }
+
+    /// Resolve an ok.ru embed into direct renditions via its player-metadata
+    /// API (`/dk?cmd=videoPlayerMetadata&mid=<id>`), which returns the
+    /// progressive MP4 list plus an adaptive HLS manifest. Empty when the video
+    /// is gone or `copyrightsRestricted` (the API answers `{"error":…}`).
+    async fn extract_okru(&self, embed_url: &str, name: &str) -> Result<Vec<VideoSource>> {
+        let mid = match okru_mid(embed_url) {
+            Some(m) => m,
+            None => return Ok(Vec::new()),
+        };
+        let body = self
+            .client
+            .post(format!(
+                "https://ok.ru/dk?cmd=videoPlayerMetadata&mid={mid}"
+            ))
+            .header("Referer", "https://ok.ru/")
+            .send()
+            .await?
+            .error_for_status()?
+            .text()
+            .await?;
+        Ok(parse_okru_metadata(&body, name))
+    }
+}
+
+/// Extract the `src: "…"` string from the first `player.src({ … })` call in an
+/// mp4upload embed page. Whitespace/newlines between tokens vary, so we scan for
+/// the `player.src(` anchor, then the next `src:` and its quoted value.
+fn find_player_src(html: &str) -> Option<&str> {
+    let after = &html[html.find("player.src(")?..];
+    let after = &after[after.find("src:")?..];
+    let start = after.find('"')? + 1;
+    let rest = &after[start..];
+    let end = rest.find('"')?;
+    let url = rest[..end].trim();
+    url.starts_with("http").then_some(url)
+}
+
+/// Numeric video id from an ok.ru embed URL (`.../videoembed/<id>` or
+/// `.../video/<id>`). ok.ru ids are all-digit; anything else is unrecognised.
+fn okru_mid(url: &str) -> Option<String> {
+    let path = url.split(['?', '#']).next().unwrap_or(url);
+    let seg = path.trim_end_matches('/').rsplit('/').next()?;
+    (!seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit())).then(|| seg.to_string())
+}
+
+/// Map an ok.ru rendition label to an approximate vertical resolution; unknown
+/// labels pass through so the quality chip still shows something meaningful.
+fn okru_quality(name: &str) -> String {
+    match name {
+        "mobile" => "144",
+        "lowest" => "240",
+        "low" => "360",
+        "sd" => "480",
+        "hd" => "720",
+        "full" => "1080",
+        "quad" => "1440",
+        "ultra" => "2160",
+        other => other,
+    }
+    .to_string()
+}
+
+/// Parse ok.ru `videoPlayerMetadata` JSON into playable sources: the
+/// progressive `videos:[{name,url}]` renditions plus the adaptive HLS manifest
+/// (added last but floated to the top by its [`crate::models::StreamKind::Hls`]
+/// playability rank). Empty on an `{"error":…}` body or unparseable JSON.
+fn parse_okru_metadata(body: &str, name: &str) -> Vec<VideoSource> {
+    let v: Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    if v.get("error").is_some() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if let Some(arr) = v.get("videos").and_then(Value::as_array) {
+        for item in arr {
+            let Some(url) = item.get("url").and_then(Value::as_str) else {
+                continue;
+            };
+            if url.is_empty() {
+                continue;
+            }
+            let quality = item
+                .get("name")
+                .and_then(Value::as_str)
+                .map_or_else(|| "auto".to_string(), okru_quality);
+            out.push(VideoSource {
+                provider_name: name.to_string(),
+                quality,
+                url: normalize_scheme(url),
+                kind: crate::models::StreamKind::Mp4,
+                referer: None,
+                subtitles: Vec::new(),
+            });
+        }
+    }
+    for key in ["hlsManifestUrl", "hlsMasterPlaylistUrl", "ondemandHls"] {
+        if let Some(u) = v.get(key).and_then(Value::as_str).filter(|u| !u.is_empty()) {
+            out.push(VideoSource {
+                provider_name: name.to_string(),
+                quality: "auto".into(),
+                url: normalize_scheme(u),
+                kind: crate::models::StreamKind::Hls,
+                referer: None,
+                subtitles: Vec::new(),
+            });
+            break;
+        }
+    }
+    out
+}
+
+/// Promote a protocol-relative (`//host/…`) URL to `https://`; pass others
+/// through unchanged. ok.ru occasionally emits scheme-relative CDN URLs.
+fn normalize_scheme(url: &str) -> String {
+    match url.strip_prefix("//") {
+        Some(rest) => format!("https://{rest}"),
+        None => url.to_string(),
     }
 }
 
@@ -317,11 +548,73 @@ mod tests {
 
     #[test]
     fn find_tobeparsed_nested() {
-        let v: Value = serde_json::from_str(
-            r#"{"data":{"episode":{"tobeparsed":"AAAA","other":1}}}"#,
-        )
-        .unwrap();
+        let v: Value =
+            serde_json::from_str(r#"{"data":{"episode":{"tobeparsed":"AAAA","other":1}}}"#)
+                .unwrap();
         assert_eq!(find_tobeparsed(&v), Some("AAAA"));
+    }
+
+    #[test]
+    fn find_player_src_extracts_mp4() {
+        let html = r#"
+            <script>
+            var player = videojs('vid');
+            player.src({
+                type: "video/mp4",
+                src: "https://a3.mp4upload.com:183/d/abc/video.mp4"
+            })
+            </script>"#;
+        assert_eq!(
+            find_player_src(html),
+            Some("https://a3.mp4upload.com:183/d/abc/video.mp4")
+        );
+    }
+
+    #[test]
+    fn find_player_src_none_when_absent() {
+        assert_eq!(find_player_src("<html>File deleted</html>"), None);
+        // player.src present but no usable http src (deleted-file placeholder).
+        assert_eq!(find_player_src(r#"player.src({src: ""})"#), None);
+    }
+
+    #[test]
+    fn okru_mid_from_embed_urls() {
+        assert_eq!(
+            okru_mid("https://ok.ru/videoembed/3201471154834").as_deref(),
+            Some("3201471154834")
+        );
+        assert_eq!(
+            okru_mid("https://ok.ru/video/123?st=1").as_deref(),
+            Some("123")
+        );
+        assert_eq!(okru_mid("https://ok.ru/videoembed/abc").as_deref(), None);
+    }
+
+    #[test]
+    fn parse_okru_metadata_extracts_mp4s_and_hls() {
+        let body = r#"{
+            "videos":[
+                {"name":"sd","url":"//vd1.okcdn.ru/sd.mp4"},
+                {"name":"full","url":"https://vd2.okcdn.ru/full.mp4"},
+                {"name":"skip"}
+            ],
+            "hlsManifestUrl":"https://vd.okcdn.ru/hls/master.m3u8?p=1"
+        }"#;
+        let out = parse_okru_metadata(body, "Ok");
+        // 2 mp4 renditions + 1 hls manifest; the "skip" entry (no url) dropped.
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0].quality, "480");
+        assert_eq!(out[0].url, "https://vd1.okcdn.ru/sd.mp4"); // scheme promoted
+        assert_eq!(out[1].quality, "1080");
+        assert_eq!(out[2].kind, crate::models::StreamKind::Hls);
+        // The HLS manifest outranks the progressive MP4s for defaulting.
+        assert_eq!(playability_rank(&out[2]), 0);
+    }
+
+    #[test]
+    fn parse_okru_metadata_empty_on_error_or_garbage() {
+        assert!(parse_okru_metadata(r#"{"error":"copyrightsRestricted"}"#, "Ok").is_empty());
+        assert!(parse_okru_metadata("not json", "Ok").is_empty());
     }
 
     fn src(url: &str, kind: crate::models::StreamKind) -> crate::models::VideoSource {
@@ -342,18 +635,33 @@ mod tests {
         assert_eq!(playability_rank(&src("https://cdn/x.mp4", Mp4)), 0);
         assert_eq!(playability_rank(&src("https://cdn/x.m3u8", Hls)), 0);
         assert_eq!(
-            playability_rank(&src("https://tools.fast4speed.rsvp/media/1?Authorization=z", Mp4)),
+            playability_rank(&src(
+                "https://tools.fast4speed.rsvp/media/1?Authorization=z",
+                Mp4
+            )),
             0
         );
         assert_eq!(
-            playability_rank(&src("https://x.sharepoint.com/_layouts/15/download.aspx?id=1", Mp4)),
+            playability_rank(&src(
+                "https://x.sharepoint.com/_layouts/15/download.aspx?id=1",
+                Mp4
+            )),
             0
         );
         // HTML embed pages -> 2
-        assert_eq!(playability_rank(&src("https://ok.ru/videoembed/123", Mp4)), 2);
-        assert_eq!(playability_rank(&src("https://mp4upload.com/embed-a.html", Mp4)), 2);
+        assert_eq!(
+            playability_rank(&src("https://ok.ru/videoembed/123", Mp4)),
+            2
+        );
+        assert_eq!(
+            playability_rank(&src("https://mp4upload.com/embed-a.html", Mp4)),
+            2
+        );
         assert_eq!(playability_rank(&src("https://vidnest.io/e/abc", Mp4)), 2);
-        assert_eq!(playability_rank(&src("https://allanime.uns.bio/#abc", Mp4)), 2);
+        assert_eq!(
+            playability_rank(&src("https://allanime.uns.bio/#abc", Mp4)),
+            2
+        );
         // Unknown -> 1
         assert_eq!(playability_rank(&src("https://weird.host/thing", Mp4)), 1);
     }

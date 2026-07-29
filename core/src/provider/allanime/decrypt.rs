@@ -50,8 +50,7 @@ pub fn derive_key_xor(part_b_b64: &str, mask_hex: &str) -> Result<[u8; 32]> {
     let part_b = base64::engine::general_purpose::STANDARD
         .decode(part_b_b64.trim())
         .map_err(|e| Error::Decrypt(format!("bad base64 in bootstrap partB: {e}")))?;
-    let mask =
-        hex::decode(mask_hex).map_err(|e| Error::Decrypt(format!("bad mask hex: {e}")))?;
+    let mask = hex::decode(mask_hex).map_err(|e| Error::Decrypt(format!("bad mask hex: {e}")))?;
     if part_b.len() != 32 || mask.len() != 32 {
         return Err(Error::Decrypt(format!(
             "key material wrong length: partB={} mask={}",
@@ -66,11 +65,56 @@ pub fn derive_key_xor(part_b_b64: &str, mask_hex: &str) -> Result<[u8; 32]> {
     Ok(key)
 }
 
+/// HMAC-SHA256 (`bg` in the web client's crypto bundle). Hand-rolled to avoid a
+/// new dependency; standard construction over SHA-256's 64-byte block.
+fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
+    const BLOCK: usize = 64;
+    let mut block_key = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        block_key[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        block_key[..key.len()].copy_from_slice(key);
+    }
+    let mut ipad = [0x36u8; BLOCK];
+    let mut opad = [0x5cu8; BLOCK];
+    for i in 0..BLOCK {
+        ipad[i] ^= block_key[i];
+        opad[i] ^= block_key[i];
+    }
+    let mut inner = Sha256::new();
+    inner.update(ipad);
+    inner.update(data);
+    let inner = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(opad);
+    outer.update(inner);
+    outer.finalize().into()
+}
+
+/// Sign the `x-aa-boot` header the bootstrap endpoint now requires (web client
+/// `PS`). Two chained HMAC-SHA256s over the static mask, hex-encoded:
+/// `hex(HMAC(HMAC(mask, "aa-boot:<buildId>"), "<buildId>:<keyGroup>:<refererHost>:<epoch>:<lane>"))`.
+pub fn sign_aa_boot(
+    mask_hex: &str,
+    build_id: &str,
+    key_group: &str,
+    referer_host: &str,
+    epoch: u64,
+    lane: &str,
+) -> Result<String> {
+    let mask = hex::decode(mask_hex).map_err(|e| Error::Decrypt(format!("bad mask hex: {e}")))?;
+    let inner_key =
+        hmac_sha256(&mask, format!("{}{build_id}", super::AA_BOOT_PREFIX).as_bytes());
+    let sig = format!("{build_id}:{key_group}:{referer_host}:{epoch}:{lane}");
+    let mac = hmac_sha256(&inner_key, sig.as_bytes());
+    Ok(hex::encode(mac))
+}
+
 /// Sign an `aaReq` token the `episode(...)` GraphQL query now requires.
 ///
-/// Mirrors the web client (`Nb`/`Tb`): build a compact JSON payload, derive a
-/// 12-byte nonce as `SHA-256("epoch:buildId:qh:ts")[..12]`, AES-256-GCM encrypt
-/// the payload, and base64 the envelope `0x01 || nonce(12) || ciphertext+tag`.
+/// Mirrors the web client (`r2`): build a compact JSON payload, derive a 12-byte
+/// nonce as `SHA-256("epoch:buildId:qh:ts:lane")[..12]`, AES-256-GCM encrypt the
+/// payload, and base64 the envelope `0x01 || nonce(12) || ciphertext+tag`.
 /// `now_ms` is floored to a 5-minute bucket so the token stays stable within a
 /// window and the server accepts it as fresh.
 pub fn sign_aa_req(
@@ -78,16 +122,17 @@ pub fn sign_aa_req(
     epoch: u64,
     build_id: &str,
     query_hash: &str,
+    lane: &str,
     now_ms: u128,
 ) -> Result<String> {
     let ts = (now_ms / TS_BUCKET_MS) * TS_BUCKET_MS;
     // Field order matches the web client's JSON.stringify; the server parses by
     // key so order is not load-bearing, but keep it identical to be safe.
     let payload = format!(
-        r#"{{"v":1,"ts":{ts},"epoch":{epoch},"buildId":"{build_id}","qh":"{query_hash}"}}"#
+        r#"{{"v":1,"ts":{ts},"epoch":{epoch},"buildId":"{build_id}","qh":"{query_hash}","k":"{lane}"}}"#
     );
 
-    let seed = format!("{epoch}:{build_id}:{query_hash}:{ts}");
+    let seed = format!("{epoch}:{build_id}:{query_hash}:{ts}:{lane}");
     let nonce_bytes = Sha256::digest(seed.as_bytes());
     let nonce = Nonce::from_slice(&nonce_bytes[..12]);
 
@@ -258,7 +303,8 @@ mod tests {
         let qh = "d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec";
         // A ts already aligned to the 5-minute bucket, so the token is exact.
         let now_ms = 1_784_600_000_000u128;
-        let token = sign_aa_req(&key, epoch, "63", qh, now_ms).unwrap();
+        let lane = "k7";
+        let token = sign_aa_req(&key, epoch, "75", qh, lane, now_ms).unwrap();
 
         // Envelope: 0x01 || nonce(12) || ciphertext+tag. Recover and verify it
         // decrypts (i.e. the GCM tag is valid) back to the expected payload.
@@ -267,7 +313,7 @@ mod tests {
             .unwrap();
         assert_eq!(blob[0], 0x01);
         let ts = (now_ms / TS_BUCKET_MS) * TS_BUCKET_MS;
-        let expected_nonce = Sha256::digest(format!("{epoch}:63:{qh}:{ts}").as_bytes());
+        let expected_nonce = Sha256::digest(format!("{epoch}:75:{qh}:{ts}:{lane}").as_bytes());
         assert_eq!(&blob[1..13], &expected_nonce[..12]);
 
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
@@ -276,7 +322,29 @@ mod tests {
             .expect("aaReq envelope should authenticate and decrypt");
         assert_eq!(
             String::from_utf8(plaintext).unwrap(),
-            format!(r#"{{"v":1,"ts":{ts},"epoch":{epoch},"buildId":"63","qh":"{qh}"}}"#)
+            format!(
+                r#"{{"v":1,"ts":{ts},"epoch":{epoch},"buildId":"75","qh":"{qh}","k":"{lane}"}}"#
+            )
+        );
+    }
+
+    #[test]
+    fn aa_boot_matches_web_client() {
+        // Cross-checked against the live web client's `PS()` run in Node:
+        // hex(HMAC(HMAC(mask,"aa-boot:75"), "75:mkissa:mkissa.to:6887:k7")).
+        let got = sign_aa_boot(
+            "ff65f1ba05d2556424dfec9f38f816e0a7d284a951845c865a609cb83bee7690",
+            "75",
+            "mkissa",
+            "mkissa.to",
+            6887,
+            "k7",
+        )
+        .unwrap();
+        assert_eq!(got.len(), 64);
+        assert_eq!(
+            got,
+            "7eb17241a906398c25974817c90cbcf1ad9333ba5851161c5b2ac1c25f34e898"
         );
     }
 }

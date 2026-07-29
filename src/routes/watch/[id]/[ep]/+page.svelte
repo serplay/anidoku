@@ -42,6 +42,13 @@
 	let hls: Hls | null = null;
 	let lastSaved = 0;
 	let resumeTo = 0;
+	// Source URLs already tried this load, so a failed source falls forward to
+	// the next candidate instead of dead-ending (dead streamsb/streamlare
+	// embeds, region-locked ok.ru, deleted mp4upload files, …).
+	let attempted = new Set<string>();
+	// Whether the current source ever reached playback — gates auto-advance so a
+	// transient mid-playback blip on a working source doesn't swap it out.
+	let startedPlaying = false;
 	let base = $state('');
 	let episodes = $state<string[]>([]);
 	let episodesFor = '';
@@ -123,6 +130,7 @@
 			base = mb;
 			sources = srcs;
 			resumeTo = ws?.position_secs ?? 0;
+			attempted = new Set();
 			if (srcs.length === 0) {
 				error = 'No playable sources found for this episode.';
 			} else {
@@ -141,7 +149,11 @@
 		void load(id, ep, dub);
 	}
 
-	function selectSource(s: VideoSource) {
+	function selectSource(s: VideoSource, manual = false) {
+		// A manual pick is a fresh intent: restart the fallback chain so every
+		// source is eligible again (including ones that failed earlier).
+		if (manual) attempted = new Set();
+		attempted.add(s.url);
 		selected = s;
 		subtitles = s.subtitles.map((t: SubtitleTrack) => ({
 			label: t.label,
@@ -152,6 +164,16 @@
 		queueMicrotask(() =>
 			attachMedia(s.kind, mediaUrl(base, s.url, s.referer, s.kind === 'mp4' ? 'video/mp4' : undefined))
 		);
+	}
+
+	// Move to the next source not yet tried this load. Returns false when the
+	// list is exhausted, so the caller can surface the real error.
+	function advanceSource(): boolean {
+		const next = sources.find((s) => !attempted.has(s.url));
+		if (!next) return false;
+		error = null;
+		selectSource(next);
+		return true;
 	}
 
 	function teardown() {
@@ -165,6 +187,7 @@
 		if (!video) return;
 		teardown();
 		currentUrl = url;
+		startedPlaying = false;
 
 		if (kind === 'hls') {
 			// WKWebView (macOS/iOS) plays HLS natively; elsewhere use hls.js.
@@ -175,10 +198,12 @@
 				hls.loadSource(url);
 				hls.attachMedia(video);
 				hls.on(Hls.Events.ERROR, (_e, data) => {
-					if (data.fatal)
-						error = `HLS error: ${data.type} / ${data.details}` +
-							(data.response ? ` (HTTP ${data.response.code})` : '') +
-							` — source: ${url}`;
+					if (!data.fatal) return;
+					// Fall forward to the next source before giving up.
+					if (!startedPlaying && advanceSource()) return;
+					error = `HLS error: ${data.type} / ${data.details}` +
+						(data.response ? ` (HTTP ${data.response.code})` : '') +
+						` — source: ${url}`;
 				});
 			} else {
 				error = 'HLS is not supported in this webview.';
@@ -200,8 +225,15 @@
 	function onVideoError() {
 		const e = video?.error;
 		if (!e) return;
+		// A source that never started playing is a dead embed / bad link — try
+		// the next one silently before surfacing the failure.
+		if (!startedPlaying && advanceSource()) return;
 		const desc = MEDIA_ERR[e.code] ?? `code ${e.code}`;
 		error = `Playback failed [${desc}]${e.message ? `: ${e.message}` : ''} — source: ${currentUrl}`;
+	}
+
+	function onplaying() {
+		startedPlaying = true;
 	}
 
 	function onloaded() {
@@ -357,6 +389,7 @@
 			onloadedmetadata={onloaded}
 			ontimeupdate={ontimeupdate}
 			onpause={onpause}
+			onplaying={onplaying}
 			{onended}
 			onerror={onVideoError}
 		>
@@ -397,7 +430,7 @@
 						<button
 							class="chip"
 							class:active={selected?.url === s.url}
-							onclick={() => selectSource(s)}
+							onclick={() => selectSource(s, true)}
 						>
 							{s.quality}
 							<span class="prov">{s.provider_name}</span>
