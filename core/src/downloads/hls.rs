@@ -103,12 +103,14 @@ pub fn pick_variant<'a>(variants: &'a [Variant], desired: &str) -> Option<&'a Va
         Ok(want) => variants.iter().min_by_key(|v| {
             let h = v.height as i64;
             // Unknown heights sort last; ties prefer higher bandwidth.
-            let dist = if h == 0 { i64::MAX / 2 } else { (h - want).abs() };
+            let dist = if h == 0 {
+                i64::MAX / 2
+            } else {
+                (h - want).abs()
+            };
             (dist, std::cmp::Reverse(v.bandwidth))
         }),
-        Err(_) => variants
-            .iter()
-            .max_by_key(|v| (v.height, v.bandwidth)),
+        Err(_) => variants.iter().max_by_key(|v| (v.height, v.bandwidth)),
     }
 }
 
@@ -122,7 +124,9 @@ fn parse_attrs(s: &str) -> HashMap<String, String> {
         rest = &rest[eq + 1..];
         let value;
         if let Some(stripped) = rest.strip_prefix('"') {
-            let Some(endq) = stripped.find('"') else { break };
+            let Some(endq) = stripped.find('"') else {
+                break;
+            };
             value = stripped[..endq].to_string();
             rest = &stripped[endq + 1..];
             rest = rest.strip_prefix(',').unwrap_or(rest);
@@ -201,10 +205,22 @@ sub/seg2.ts\n\
     fn localize_rewrites_to_local_names() {
         let base = "https://cdn/hls/720/index.m3u8";
         let mut map = HashMap::new();
-        map.insert("https://cdn/hls/720/seg0.ts".to_string(), "seg_00000.ts".to_string());
-        map.insert("https://cdn/hls/720/seg1.ts".to_string(), "seg_00001.ts".to_string());
-        map.insert("https://cdn/hls/720/sub/seg2.ts".to_string(), "seg_00002.ts".to_string());
-        map.insert("https://cdn/hls/720/key.bin".to_string(), "key_00.bin".to_string());
+        map.insert(
+            "https://cdn/hls/720/seg0.ts".to_string(),
+            "seg_00000.ts".to_string(),
+        );
+        map.insert(
+            "https://cdn/hls/720/seg1.ts".to_string(),
+            "seg_00001.ts".to_string(),
+        );
+        map.insert(
+            "https://cdn/hls/720/sub/seg2.ts".to_string(),
+            "seg_00002.ts".to_string(),
+        );
+        map.insert(
+            "https://cdn/hls/720/key.bin".to_string(),
+            "key_00.bin".to_string(),
+        );
         let local = localize_playlist(MEDIA, base, &map);
         assert!(local.contains("\nseg_00000.ts\n"));
         assert!(local.contains("\nseg_00001.ts\n"));
@@ -230,8 +246,16 @@ sub/seg2.ts\n\
     #[test]
     fn pick_variant_without_resolution_uses_bandwidth() {
         let v = vec![
-            Variant { url: "a".into(), bandwidth: 100, height: 0 },
-            Variant { url: "b".into(), bandwidth: 900, height: 0 },
+            Variant {
+                url: "a".into(),
+                bandwidth: 100,
+                height: 0,
+            },
+            Variant {
+                url: "b".into(),
+                bandwidth: 900,
+                height: 0,
+            },
         ];
         assert_eq!(pick_variant(&v, "best").unwrap().url, "b");
         assert_eq!(pick_variant(&v, "720").unwrap().url, "b");

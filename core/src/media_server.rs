@@ -123,7 +123,12 @@ async fn handle_media(
     // through with Range forwarded so we relay upstream 206 / Content-Range.
     let resp = match st.proxy.get_ranged(url, referer, range.as_deref()).await {
         Ok(r) => r,
-        Err(e) => return text(StatusCode::BAD_GATEWAY, &format!("upstream fetch failed: {e}")),
+        Err(e) => {
+            return text(
+                StatusCode::BAD_GATEWAY,
+                &format!("upstream fetch failed: {e}"),
+            )
+        }
     };
 
     // Safety net: a playlist whose URL lacks `.m3u8` but is served with an HLS
@@ -136,9 +141,8 @@ async fn handle_media(
             Err(e) => return text(StatusCode::BAD_GATEWAY, &format!("read failed: {e}")),
         };
         let playlist = String::from_utf8_lossy(&bytes);
-        let rewritten = proxy::rewrite_playlist(&playlist, url, |abs| {
-            make_media_url(&st.base, abs, referer)
-        });
+        let rewritten =
+            proxy::rewrite_playlist(&playlist, url, |abs| make_media_url(&st.base, abs, referer));
         return serve_bytes(
             rewritten.into_bytes(),
             "application/vnd.apple.mpegurl",
@@ -166,7 +170,12 @@ async fn serve_playlist(
 ) -> Response {
     let fetched = match st.proxy.fetch(url, referer).await {
         Ok(f) => f,
-        Err(e) => return text(StatusCode::BAD_GATEWAY, &format!("upstream fetch failed: {e}")),
+        Err(e) => {
+            return text(
+                StatusCode::BAD_GATEWAY,
+                &format!("upstream fetch failed: {e}"),
+            )
+        }
     };
     let playlist = String::from_utf8_lossy(&fetched.bytes);
     let rewritten =
@@ -256,9 +265,7 @@ async fn handle_download(
     let Some(abs) = safe_join(root, &path) else {
         return text(StatusCode::FORBIDDEN, "invalid path");
     };
-    let range = req_headers
-        .get(header::RANGE)
-        .and_then(|v| v.to_str().ok());
+    let range = req_headers.get(header::RANGE).and_then(|v| v.to_str().ok());
     serve_file(&abs, range).await
 }
 
@@ -309,7 +316,12 @@ async fn serve_file(path: &Path, range: Option<&str>) -> Response {
 
     let mut file = match tokio::fs::File::open(path).await {
         Ok(f) => f,
-        Err(e) => return text(StatusCode::INTERNAL_SERVER_ERROR, &format!("open failed: {e}")),
+        Err(e) => {
+            return text(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("open failed: {e}"),
+            )
+        }
     };
 
     let (status, start, len) = match br {
@@ -318,7 +330,10 @@ async fn serve_file(path: &Path, range: Option<&str>) -> Response {
     };
     if start > 0 {
         if let Err(e) = file.seek(std::io::SeekFrom::Start(start)).await {
-            return text(StatusCode::INTERNAL_SERVER_ERROR, &format!("seek failed: {e}"));
+            return text(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("seek failed: {e}"),
+            );
         }
     }
     let stream = tokio_util::io::ReaderStream::new(tokio::io::AsyncReadExt::take(file, len));
@@ -364,7 +379,10 @@ fn is_generic_ct(ct: &str) -> bool {
         || ct.starts_with("binary/octet-stream")
 }
 
-fn header_str(headers: &reqwest::header::HeaderMap, name: reqwest::header::HeaderName) -> Option<String> {
+fn header_str(
+    headers: &reqwest::header::HeaderMap,
+    name: reqwest::header::HeaderName,
+) -> Option<String> {
     headers
         .get(name)
         .and_then(|v| v.to_str().ok())
@@ -424,7 +442,10 @@ mod tests {
     #[test]
     fn local_content_types() {
         assert_eq!(local_content_type(Path::new("a/video.mp4")), "video/mp4");
-        assert_eq!(local_content_type(Path::new("a/seg_00001.ts")), "video/mp2t");
+        assert_eq!(
+            local_content_type(Path::new("a/seg_00001.ts")),
+            "video/mp2t"
+        );
         assert_eq!(
             local_content_type(Path::new("a/index.m3u8")),
             "application/vnd.apple.mpegurl"
@@ -446,10 +467,7 @@ mod tests {
         // Full body.
         let resp = serve_file(&path, None).await;
         assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(
-            resp.headers().get(header::ACCEPT_RANGES).unwrap(),
-            "bytes"
-        );
+        assert_eq!(resp.headers().get(header::ACCEPT_RANGES).unwrap(), "bytes");
         let body = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
         assert_eq!(body.len(), 100);
 

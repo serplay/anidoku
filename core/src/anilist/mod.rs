@@ -362,7 +362,9 @@ impl AniListClient {
     }
 
     pub async fn media_by_id(&self, id: i64) -> Result<Option<MediaInfo>> {
-        let v = self.post(None, MEDIA_BY_ID_QUERY, json!({ "id": id })).await?;
+        let v = self
+            .post(None, MEDIA_BY_ID_QUERY, json!({ "id": id }))
+            .await?;
         let media = v.pointer("/data/Media");
         match media {
             Some(m) if !m.is_null() => Ok(Some(parse::parse_media_obj(m))),

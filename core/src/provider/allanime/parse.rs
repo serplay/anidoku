@@ -127,7 +127,11 @@ pub fn parse_source_refs(decrypted_json: &str) -> Result<Vec<SourceRef>> {
 /// The response is `{ "links": [ { "link": "...", "resolutionStr": "1080",
 /// "hls": bool?, "subtitles": [...] }, ... ] }`. Mirrors ani-cli's
 /// `get_links` extraction but keeps subtitle tracks (ani-cli discards them).
-pub fn parse_clock_links(body: &str, provider_name: &str, referer: Option<&str>) -> Vec<VideoSource> {
+pub fn parse_clock_links(
+    body: &str,
+    provider_name: &str,
+    referer: Option<&str>,
+) -> Vec<VideoSource> {
     let Ok(v) = serde_json::from_str::<Value>(body) else {
         return Vec::new();
     };
@@ -145,9 +149,13 @@ pub fn parse_clock_links(body: &str, provider_name: &str, referer: Option<&str>)
             .and_then(Value::as_str)
             .unwrap_or("auto")
             .to_string();
-        let is_hls = l.get("hls").and_then(Value::as_bool).unwrap_or(false)
-            || url.contains(".m3u8");
-        let kind = if is_hls { StreamKind::Hls } else { StreamKind::Mp4 };
+        let is_hls =
+            l.get("hls").and_then(Value::as_bool).unwrap_or(false) || url.contains(".m3u8");
+        let kind = if is_hls {
+            StreamKind::Hls
+        } else {
+            StreamKind::Mp4
+        };
 
         let subtitles = l
             .get("subtitles")

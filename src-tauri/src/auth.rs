@@ -200,7 +200,7 @@ pub async fn run_loopback_capture(timeout: Duration) -> Result<Captured, String>
         }
 
         if path.starts_with("/capture") {
-            let query = path.splitn(2, '?').nth(1).unwrap_or("");
+            let query = path.split_once('?').map(|x| x.1).unwrap_or("");
             let params = parse_query(query);
             let _ = write_http(&mut stream, "200 OK", "text/html", DONE_HTML).await;
             let _ = stream.shutdown().await;

@@ -18,6 +18,10 @@ pub struct Database {
     conn: Mutex<Connection>,
 }
 
+/// A cached anime row: `(title_romaji, title_english, cover_url)`. The two
+/// optional columns can be NULL when only a provider result seeded the row.
+type CachedAnime = (String, Option<String>, Option<String>);
+
 impl Database {
     pub fn open(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
@@ -42,7 +46,11 @@ impl Database {
 
     // ---- watch_state (resume points) ----
 
-    pub fn get_watch_state(&self, anime_id: &str, episode_number: &str) -> Result<Option<WatchState>> {
+    pub fn get_watch_state(
+        &self,
+        anime_id: &str,
+        episode_number: &str,
+    ) -> Result<Option<WatchState>> {
         let conn = self.conn.lock().unwrap();
         let row = conn
             .query_row(
@@ -129,7 +137,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_cached_anime(&self, provider_id: &str) -> Result<Option<(String, Option<String>, Option<String>)>> {
+    pub fn get_cached_anime(&self, provider_id: &str) -> Result<Option<CachedAnime>> {
         let conn = self.conn.lock().unwrap();
         let row = conn
             .query_row(
@@ -347,15 +355,20 @@ impl Database {
             Some(e) => {
                 // Already listed. Only advance progress (monotonic); keep status.
                 if progress > e.progress {
-                    let updated = self.set_list_entry_local(anilist_id, e.status, progress, e.score)?;
+                    let updated =
+                        self.set_list_entry_local(anilist_id, e.status, progress, e.score)?;
                     Ok((updated, true))
                 } else {
                     Ok((e, false))
                 }
             }
             None => {
-                let e =
-                    self.set_list_entry_local(anilist_id, MediaListStatus::Current, progress, None)?;
+                let e = self.set_list_entry_local(
+                    anilist_id,
+                    MediaListStatus::Current,
+                    progress,
+                    None,
+                )?;
                 Ok((e, true))
             }
         }
@@ -620,7 +633,10 @@ impl Database {
 
     pub fn delete_airing(&self, anilist_id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM airing WHERE anilist_id = ?1", params![anilist_id])?;
+        conn.execute(
+            "DELETE FROM airing WHERE anilist_id = ?1",
+            params![anilist_id],
+        )?;
         Ok(())
     }
 
@@ -731,7 +747,11 @@ impl Database {
 
     pub fn unread_notification_count(&self) -> Result<i64> {
         let conn = self.conn.lock().unwrap();
-        Ok(conn.query_row("SELECT count(*) FROM notifications WHERE read = 0", [], |r| r.get(0))?)
+        Ok(conn.query_row(
+            "SELECT count(*) FROM notifications WHERE read = 0",
+            [],
+            |r| r.get(0),
+        )?)
     }
 
     pub fn mark_all_notifications_read(&self) -> Result<()> {
@@ -793,7 +813,8 @@ mod tests {
         let db = Database::open_in_memory().unwrap();
         assert!(db.get_watch_state("show1", "1").unwrap().is_none());
 
-        db.set_watch_state("show1", "1", 42.5, Some(1440.0)).unwrap();
+        db.set_watch_state("show1", "1", 42.5, Some(1440.0))
+            .unwrap();
         let ws = db.get_watch_state("show1", "1").unwrap().unwrap();
         assert_eq!(ws.position_secs, 42.5);
         assert_eq!(ws.duration_secs, Some(1440.0));
@@ -821,14 +842,15 @@ mod tests {
             .unwrap();
         assert_eq!(e.progress, 3);
         assert_eq!(e.score, Some(8.0)); // preserved
-        // …but never below zero.
+                                        // …but never below zero.
         let e = db
             .set_list_entry_local(154587, MediaListStatus::Current, -2, None)
             .unwrap();
         assert_eq!(e.progress, 0);
         // The automatic path stays monotonic: re-watching an episode at or
         // below current progress is a no-op, above it advances.
-        db.set_list_entry_local(154587, MediaListStatus::Current, 3, None).unwrap();
+        db.set_list_entry_local(154587, MediaListStatus::Current, 3, None)
+            .unwrap();
         let (_e, changed) = db.ensure_current(154587, 2).unwrap();
         assert!(!changed);
         let (e, changed) = db.ensure_current(154587, 4).unwrap();
@@ -855,7 +877,8 @@ mod tests {
     #[test]
     fn mark_watched_promotes_to_completed_on_last_episode() {
         let db = Database::open_in_memory().unwrap();
-        db.upsert_media(100, Some("Show"), None, None, Some(12), Some("TV")).unwrap();
+        db.upsert_media(100, Some("Show"), None, None, Some(12), Some("TV"))
+            .unwrap();
         // Mid-season: stays CURRENT.
         let (e, changed) = db.mark_watched(100, 11).unwrap();
         assert!(changed);
@@ -875,8 +898,10 @@ mod tests {
     fn mark_watched_promotes_even_when_progress_already_at_count() {
         let db = Database::open_in_memory().unwrap();
         // Entry reached the count before the episode total became known.
-        db.set_list_entry_local(100, MediaListStatus::Current, 12, None).unwrap();
-        db.upsert_media(100, Some("Show"), None, None, Some(12), Some("TV")).unwrap();
+        db.set_list_entry_local(100, MediaListStatus::Current, 12, None)
+            .unwrap();
+        db.upsert_media(100, Some("Show"), None, None, Some(12), Some("TV"))
+            .unwrap();
         let (e, changed) = db.mark_watched(100, 12).unwrap();
         assert!(changed);
         assert_eq!(e.status, MediaListStatus::Completed);
@@ -894,13 +919,23 @@ mod tests {
     #[test]
     fn library_join_pulls_media_and_provider() {
         let db = Database::open_in_memory().unwrap();
-        db.cache_anime("prov1", "Frieren", None, None, Some(28)).unwrap();
-        db.link_provider_anilist("prov1", 154587).unwrap();
-        db.upsert_media(154587, Some("Sousou no Frieren"), Some("Frieren"), Some("http://c.jpg"), Some(28), Some("TV"))
+        db.cache_anime("prov1", "Frieren", None, None, Some(28))
             .unwrap();
-        db.set_list_entry_local(154587, MediaListStatus::Current, 5, None).unwrap();
+        db.link_provider_anilist("prov1", 154587).unwrap();
+        db.upsert_media(
+            154587,
+            Some("Sousou no Frieren"),
+            Some("Frieren"),
+            Some("http://c.jpg"),
+            Some(28),
+            Some("TV"),
+        )
+        .unwrap();
+        db.set_list_entry_local(154587, MediaListStatus::Current, 5, None)
+            .unwrap();
         // An entry with no media/provider metadata still shows up.
-        db.set_list_entry_local(999, MediaListStatus::Planning, 0, None).unwrap();
+        db.set_list_entry_local(999, MediaListStatus::Planning, 0, None)
+            .unwrap();
 
         let lib = db.library().unwrap();
         assert_eq!(lib.len(), 2);
@@ -943,7 +978,10 @@ mod tests {
         db.link_provider_anilist("provA", 42).unwrap();
         // provB claiming the same anilist_id must not error (best-effort).
         db.link_provider_anilist("provB", 42).unwrap();
-        assert_eq!(db.provider_id_for_anilist(42).unwrap().as_deref(), Some("provA"));
+        assert_eq!(
+            db.provider_id_for_anilist(42).unwrap().as_deref(),
+            Some("provA")
+        );
         assert_eq!(db.anilist_id_for_provider("provB").unwrap(), None);
     }
 
@@ -975,11 +1013,17 @@ mod tests {
     #[test]
     fn notifications_dedupe_and_unread() {
         let db = Database::open_in_memory().unwrap();
-        assert!(db.insert_notification(100, 3, Some(5000), "episode").unwrap());
+        assert!(db
+            .insert_notification(100, 3, Some(5000), "episode")
+            .unwrap());
         // Same (anilist_id, episode) is a no-op (de-dupe) — false.
-        assert!(!db.insert_notification(100, 3, Some(5000), "episode").unwrap());
+        assert!(!db
+            .insert_notification(100, 3, Some(5000), "episode")
+            .unwrap());
         // A different episode fires.
-        assert!(db.insert_notification(100, 4, Some(6000), "episode").unwrap());
+        assert!(db
+            .insert_notification(100, 4, Some(6000), "episode")
+            .unwrap());
         assert_eq!(db.unread_notification_count().unwrap(), 2);
         assert_eq!(db.notifications().unwrap().len(), 2);
         db.mark_all_notifications_read().unwrap();
@@ -991,9 +1035,12 @@ mod tests {
     #[test]
     fn airing_upsert_and_tracked_ids() {
         let db = Database::open_in_memory().unwrap();
-        db.set_list_entry_local(100, MediaListStatus::Current, 1, None).unwrap();
-        db.set_list_entry_local(200, MediaListStatus::Planning, 0, None).unwrap();
-        db.set_list_entry_local(300, MediaListStatus::Completed, 12, None).unwrap();
+        db.set_list_entry_local(100, MediaListStatus::Current, 1, None)
+            .unwrap();
+        db.set_list_entry_local(200, MediaListStatus::Planning, 0, None)
+            .unwrap();
+        db.set_list_entry_local(300, MediaListStatus::Completed, 12, None)
+            .unwrap();
         let mut ids = db.tracked_anilist_ids(false).unwrap();
         ids.sort();
         assert_eq!(ids, vec![100]); // only CURRENT/REPEATING
@@ -1011,7 +1058,11 @@ mod tests {
         db.upsert_airing(&row).unwrap();
         assert_eq!(db.all_airing().unwrap().len(), 1);
         // Upsert advances the same row.
-        db.upsert_airing(&AiringRow { next_episode: Some(3), ..row.clone() }).unwrap();
+        db.upsert_airing(&AiringRow {
+            next_episode: Some(3),
+            ..row.clone()
+        })
+        .unwrap();
         let all = db.all_airing().unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].next_episode, Some(3));
@@ -1022,13 +1073,23 @@ mod tests {
     #[test]
     fn continue_watching_lists_current_with_next_episode() {
         let db = Database::open_in_memory().unwrap();
-        db.cache_anime("prov1", "Frieren", None, None, Some(28)).unwrap();
-        db.link_provider_anilist("prov1", 154587).unwrap();
-        db.upsert_media(154587, Some("Sousou no Frieren"), Some("Frieren"), None, Some(28), Some("TV"))
+        db.cache_anime("prov1", "Frieren", None, None, Some(28))
             .unwrap();
-        db.set_list_entry_local(154587, MediaListStatus::Current, 5, None).unwrap();
+        db.link_provider_anilist("prov1", 154587).unwrap();
+        db.upsert_media(
+            154587,
+            Some("Sousou no Frieren"),
+            Some("Frieren"),
+            None,
+            Some(28),
+            Some("TV"),
+        )
+        .unwrap();
+        db.set_list_entry_local(154587, MediaListStatus::Current, 5, None)
+            .unwrap();
         // A completed show must not appear.
-        db.set_list_entry_local(999, MediaListStatus::Completed, 12, None).unwrap();
+        db.set_list_entry_local(999, MediaListStatus::Completed, 12, None)
+            .unwrap();
 
         let cw = db.continue_watching().unwrap();
         assert_eq!(cw.len(), 1);
@@ -1038,7 +1099,8 @@ mod tests {
         assert_eq!(cw[0].provider_id.as_deref(), Some("prov1"));
 
         // A show watched to the finale has no next episode.
-        db.set_list_entry_local(154587, MediaListStatus::Current, 28, None).unwrap();
+        db.set_list_entry_local(154587, MediaListStatus::Current, 28, None)
+            .unwrap();
         let cw = db.continue_watching().unwrap();
         assert_eq!(cw[0].next_episode, None);
     }
@@ -1046,10 +1108,17 @@ mod tests {
     #[test]
     fn anime_cache_roundtrip() {
         let db = Database::open_in_memory().unwrap();
-        db.cache_anime("abc", "Sousou no Frieren", Some("Frieren"), Some("http://x/c.jpg"), Some(28))
-            .unwrap();
+        db.cache_anime(
+            "abc",
+            "Sousou no Frieren",
+            Some("Frieren"),
+            Some("http://x/c.jpg"),
+            Some(28),
+        )
+        .unwrap();
         // Upsert without cover must keep the old cover.
-        db.cache_anime("abc", "Sousou no Frieren", None, None, None).unwrap();
+        db.cache_anime("abc", "Sousou no Frieren", None, None, None)
+            .unwrap();
         let (romaji, english, cover) = db.get_cached_anime("abc").unwrap().unwrap();
         assert_eq!(romaji, "Sousou no Frieren");
         assert_eq!(english.as_deref(), Some("Frieren"));

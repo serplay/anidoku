@@ -14,9 +14,9 @@ use anidoku_core::provider::Provider;
 use anidoku_core::sync::{best_match, best_provider_match};
 use serde::Serialize;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, State};
 #[cfg(target_os = "ios")]
 use tauri::Manager as _;
+use tauri::{AppHandle, Emitter, State};
 #[cfg(not(target_os = "ios"))]
 use tauri_plugin_opener::OpenerExt;
 
@@ -45,7 +45,11 @@ pub async fn search_anime(
     query: String,
     dub: bool,
 ) -> CmdResult<Vec<AnimeSummary>> {
-    let mode = if dub { TranslationType::Dub } else { TranslationType::Sub };
+    let mode = if dub {
+        TranslationType::Dub
+    } else {
+        TranslationType::Sub
+    };
     let results = state.provider.search(&query, mode).await.map_err(map_err)?;
     // Warm the metadata cache so detail pages can render offline.
     for r in &results {
@@ -66,8 +70,16 @@ pub async fn get_episodes(
     show_id: String,
     dub: bool,
 ) -> CmdResult<Vec<String>> {
-    let mode = if dub { TranslationType::Dub } else { TranslationType::Sub };
-    state.provider.episodes(&show_id, mode).await.map_err(map_err)
+    let mode = if dub {
+        TranslationType::Dub
+    } else {
+        TranslationType::Sub
+    };
+    state
+        .provider
+        .episodes(&show_id, mode)
+        .await
+        .map_err(map_err)
 }
 
 #[tauri::command]
@@ -77,7 +89,11 @@ pub async fn get_sources(
     episode: String,
     dub: bool,
 ) -> CmdResult<Vec<VideoSource>> {
-    let mode = if dub { TranslationType::Dub } else { TranslationType::Sub };
+    let mode = if dub {
+        TranslationType::Dub
+    } else {
+        TranslationType::Sub
+    };
     state
         .provider
         .sources(&show_id, &episode, mode)
@@ -91,7 +107,10 @@ pub fn get_watch_state(
     anime_id: String,
     episode: String,
 ) -> CmdResult<Option<WatchState>> {
-    state.db.get_watch_state(&anime_id, &episode).map_err(map_err)
+    state
+        .db
+        .get_watch_state(&anime_id, &episode)
+        .map_err(map_err)
 }
 
 #[tauri::command]
@@ -138,7 +157,10 @@ pub fn set_watch_state(
 /// Map an allanime episode string ("1", "13", "5.5") to an integer progress
 /// value. Fractional specials floor down; anything < 1 is ignored.
 fn episode_to_progress(ep: &str) -> Option<i64> {
-    ep.parse::<f64>().ok().map(|f| f.floor() as i64).filter(|n| *n >= 1)
+    ep.parse::<f64>()
+        .ok()
+        .map(|f| f.floor() as i64)
+        .filter(|n| *n >= 1)
 }
 
 #[tauri::command]
@@ -306,8 +328,8 @@ pub fn set_list_entry(
     progress: i64,
     score: Option<f64>,
 ) -> CmdResult<ListEntry> {
-    let status = MediaListStatus::parse(&status)
-        .ok_or_else(|| format!("invalid status: {status}"))?;
+    let status =
+        MediaListStatus::parse(&status).ok_or_else(|| format!("invalid status: {status}"))?;
     let entry = state
         .db
         .set_list_entry_local(anilist_id, status, progress, score)
@@ -361,8 +383,7 @@ pub async fn get_anime_list_state(
     episodes: Option<u32>,
     anilist_hint: Option<i64>,
 ) -> CmdResult<AnimeListState> {
-    let anilist_id =
-        resolve_mapping(&state, &provider_id, &title, episodes, anilist_hint).await;
+    let anilist_id = resolve_mapping(&state, &provider_id, &title, episodes, anilist_hint).await;
     let entry = anilist_id.and_then(|id| state.db.get_list_entry(id).ok().flatten());
     let episode_count = anilist_id.and_then(|id| state.db.media_episode_count(id).ok().flatten());
     Ok(AnimeListState {
@@ -374,7 +395,10 @@ pub async fn get_anime_list_state(
 
 /// Manual AniList search for the "wrong match?" affordance on the detail page.
 #[tauri::command]
-pub async fn search_anilist(state: State<'_, AppState>, query: String) -> CmdResult<Vec<MediaInfo>> {
+pub async fn search_anilist(
+    state: State<'_, AppState>,
+    query: String,
+) -> CmdResult<Vec<MediaInfo>> {
     state.anilist.search_media(&query).await.map_err(map_err)
 }
 
@@ -419,7 +443,10 @@ const TAGS_TTL_SECS: i64 = 7 * 24 * 3600;
 /// present but stale, the cached list is returned immediately and a background
 /// refresh is kicked off (kind to the rate limit).
 #[tauri::command]
-pub async fn get_media_tags(app: AppHandle, state: State<'_, AppState>) -> CmdResult<Vec<MediaTag>> {
+pub async fn get_media_tags(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<MediaTag>> {
     let cached = state.db.get_setting(TAGS_CACHE_KEY).map_err(map_err)?;
     let fetched_at = state
         .db
@@ -585,7 +612,10 @@ pub fn cancel_download(state: State<'_, AppState>, id: i64) -> CmdResult<()> {
 /// Delete all completed downloads of one show. Returns how many were removed.
 #[tauri::command]
 pub fn delete_anime_downloads(state: State<'_, AppState>, anime_id: String) -> CmdResult<usize> {
-    state.downloads.remove_anime_completed(&anime_id).map_err(map_err)
+    state
+        .downloads
+        .remove_anime_completed(&anime_id)
+        .map_err(map_err)
 }
 
 /// Bulk cleanup: delete every completed download. Returns how many.
@@ -636,7 +666,9 @@ pub fn get_offline_info(
     if row.state != DownloadState::Done {
         return Ok(None);
     }
-    let Some(dir) = row.dir_path else { return Ok(None) };
+    let Some(dir) = row.dir_path else {
+        return Ok(None);
+    };
     let Some(manifest) = downloads_core::read_manifest(&state.downloads_root, &dir) else {
         return Ok(None);
     };
@@ -675,7 +707,10 @@ const HOME_CACHE_SECTION: &str = "home"; // one blob for all three rows
 /// Cached home rows (instant, offline-tolerant). `None` when never fetched.
 #[tauri::command]
 pub fn get_home_cached(state: State<'_, AppState>) -> CmdResult<Option<HomePayload>> {
-    let Some((json, fetched_at)) = state.db.get_home_cache(HOME_CACHE_SECTION).map_err(map_err)?
+    let Some((json, fetched_at)) = state
+        .db
+        .get_home_cache(HOME_CACHE_SECTION)
+        .map_err(map_err)?
     else {
         return Ok(None);
     };

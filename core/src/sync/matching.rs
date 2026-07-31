@@ -211,7 +211,10 @@ mod tests {
         // "season" is dropped as noise; the bare ordinal digit is kept (Jaccard
         // similarity tolerates it, and stripping small numbers would break
         // titles like "86" or "91 Days").
-        assert_eq!(normalize("Sousou no Frieren: Season 2"), "sousou no frieren 2");
+        assert_eq!(
+            normalize("Sousou no Frieren: Season 2"),
+            "sousou no frieren 2"
+        );
         assert_eq!(normalize("Frieren - The Movie"), "frieren movie");
     }
 
@@ -231,7 +234,12 @@ mod tests {
     fn best_match_prefers_episode_count_agreement() {
         let candidates = vec![
             media(1, "Sousou no Frieren", Some("Frieren"), Some(12)),
-            media(154587, "Sousou no Frieren", Some("Frieren: Beyond"), Some(28)),
+            media(
+                154587,
+                "Sousou no Frieren",
+                Some("Frieren: Beyond"),
+                Some(28),
+            ),
         ];
         // Query knows it has 28 episodes → should pick the 28-ep candidate even
         // though titles are otherwise identical.

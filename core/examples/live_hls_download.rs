@@ -11,9 +11,7 @@
 use anidoku_core::db::Database;
 use anidoku_core::downloads::{DownloadEvent, DownloadManager};
 use anidoku_core::media_server;
-use anidoku_core::models::{
-    AnimeSummary, DownloadState, StreamKind, TranslationType, VideoSource,
-};
+use anidoku_core::models::{AnimeSummary, DownloadState, StreamKind, TranslationType, VideoSource};
 use anidoku_core::provider::Provider;
 use anidoku_core::proxy::ProxyClient;
 use anidoku_core::Result;
@@ -62,7 +60,10 @@ async fn main() {
             match ev {
                 DownloadEvent::Progress(p) => println!(
                     "  [progress] segs={}/{:?} bytes={} speed={:.0} KB/s",
-                    p.segments_done, p.segments_total, p.bytes_done, p.speed_bps / 1024.0
+                    p.segments_done,
+                    p.segments_total,
+                    p.bytes_done,
+                    p.speed_bps / 1024.0
                 ),
                 DownloadEvent::State(s) => {
                     println!("  [state] id={} -> {:?} err={:?}", s.id, s.state, s.error)
@@ -97,7 +98,10 @@ async fn main() {
         panic!("download failed: {:?}", row.error);
     }
     if row.state != DownloadState::Done {
-        println!("\n== interrupting at segments={}/{:?}", row.segments_done, row.segments_total);
+        println!(
+            "\n== interrupting at segments={}/{:?}",
+            row.segments_done, row.segments_total
+        );
         mgr.pause(id).expect("pause");
         wait_for(&db, id, Duration::from_secs(60), |r| {
             r.state == DownloadState::Paused || r.state == DownloadState::Done
@@ -117,9 +121,15 @@ async fn main() {
     let checkpoint = paused.segments_done;
     println!(
         "== paused: state={:?} segments_done={} seg files on disk={} quality={:?}",
-        paused.state, checkpoint, seg_files(), paused.quality
+        paused.state,
+        checkpoint,
+        seg_files(),
+        paused.quality
     );
-    assert!(seg_files() >= checkpoint, "checkpointed segments exist on disk");
+    assert!(
+        seg_files() >= checkpoint,
+        "checkpointed segments exist on disk"
+    );
 
     // Resume to completion.
     if paused.state == DownloadState::Paused {
@@ -135,7 +145,10 @@ async fn main() {
         panic!("resume/complete failed: {:?}", done.error);
     }
     assert_eq!(done.segments_done, done.segments_total.unwrap());
-    assert!(checkpoint > 0 && done.segments_done > checkpoint, "resume continued past the checkpoint");
+    assert!(
+        checkpoint > 0 && done.segments_done > checkpoint,
+        "resume continued past the checkpoint"
+    );
     println!(
         "== done: segments {}/{} bytes={} (resumed from checkpoint {})",
         done.segments_done,
@@ -146,12 +159,21 @@ async fn main() {
 
     // Localized playlist + manifest.
     let playlist = std::fs::read_to_string(dir.join("index.m3u8")).expect("index.m3u8 written");
-    assert!(!playlist.contains("http"), "playlist fully localized (no upstream URLs)");
-    assert!(playlist.contains("seg_00000."), "playlist references local segments");
+    assert!(
+        !playlist.contains("http"),
+        "playlist fully localized (no upstream URLs)"
+    );
+    assert!(
+        playlist.contains("seg_00000."),
+        "playlist references local segments"
+    );
     assert!(playlist.contains("#EXT-X-ENDLIST"), "playlist complete");
     let manifest = anidoku_core::downloads::read_manifest(&root, &dir_rel).expect("manifest.json");
     assert_eq!(manifest.video, "index.m3u8");
-    println!("== playlist localized OK; manifest kind={:?} quality={}", manifest.kind, manifest.quality);
+    println!(
+        "== playlist localized OK; manifest kind={:?} quality={}",
+        manifest.kind, manifest.quality
+    );
 
     // Serve and print for curl probes.
     let handle = media_server::spawn(proxy.clone(), Some(root.clone()))

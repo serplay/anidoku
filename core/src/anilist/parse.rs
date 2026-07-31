@@ -115,10 +115,7 @@ pub fn parse_media_list_collection(v: &Value) -> Result<Vec<RemoteListEntry>> {
                 continue;
             };
             let progress = e.get("progress").and_then(Value::as_i64).unwrap_or(0);
-            let score = e
-                .get("score")
-                .and_then(Value::as_f64)
-                .filter(|s| *s > 0.0);
+            let score = e.get("score").and_then(Value::as_f64).filter(|s| *s > 0.0);
             let updated_at = e.get("updatedAt").and_then(Value::as_i64).unwrap_or(0);
             let title = media.and_then(|m| m.get("title"));
             out.push(RemoteListEntry {
@@ -132,7 +129,9 @@ pub fn parse_media_list_collection(v: &Value) -> Result<Vec<RemoteListEntry>> {
                 cover_url: media
                     .and_then(|m| m.get("coverImage"))
                     .and_then(|c| str_field(c, "large")),
-                episode_count: media.and_then(|m| m.get("episodes")).and_then(Value::as_i64),
+                episode_count: media
+                    .and_then(|m| m.get("episodes"))
+                    .and_then(Value::as_i64),
             });
         }
     }
@@ -151,8 +150,12 @@ pub fn parse_home_media(m: &Value) -> HomeMedia {
         episode_count: m.get("episodes").and_then(Value::as_i64),
         format: str_field(m, "format"),
         status: str_field(m, "status"),
-        next_episode: airing.and_then(|a| a.get("episode")).and_then(Value::as_i64),
-        airing_at: airing.and_then(|a| a.get("airingAt")).and_then(Value::as_i64),
+        next_episode: airing
+            .and_then(|a| a.get("episode"))
+            .and_then(Value::as_i64),
+        airing_at: airing
+            .and_then(|a| a.get("airingAt"))
+            .and_then(Value::as_i64),
         season_year: m.get("seasonYear").and_then(Value::as_i64),
         average_score: m.get("averageScore").and_then(Value::as_i64),
     }
@@ -182,7 +185,9 @@ pub fn parse_catalog_media(m: &Value) -> CatalogMedia {
         season_year: m.get("seasonYear").and_then(Value::as_i64),
         status: str_field(m, "status"),
         genres,
-        next_episode: airing.and_then(|a| a.get("episode")).and_then(Value::as_i64),
+        next_episode: airing
+            .and_then(|a| a.get("episode"))
+            .and_then(Value::as_i64),
         is_adult: m.get("isAdult").and_then(Value::as_bool).unwrap_or(false),
     }
 }
@@ -235,7 +240,12 @@ pub fn parse_media_tags(v: &Value) -> Result<Vec<MediaTag>> {
 fn parse_home_page(v: &Value, alias: &str) -> Vec<HomeMedia> {
     v.pointer(&format!("/data/{alias}/media"))
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter(|m| !m.is_null()).map(parse_home_media).collect())
+        .map(|a| {
+            a.iter()
+                .filter(|m| !m.is_null())
+                .map(parse_home_media)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -266,8 +276,12 @@ pub fn parse_airing(v: &Value) -> Result<Vec<AiringInfo>> {
             Some(AiringInfo {
                 anilist_id,
                 media_status: str_field(m, "status"),
-                next_episode: airing.and_then(|a| a.get("episode")).and_then(Value::as_i64),
-                airing_at: airing.and_then(|a| a.get("airingAt")).and_then(Value::as_i64),
+                next_episode: airing
+                    .and_then(|a| a.get("episode"))
+                    .and_then(Value::as_i64),
+                airing_at: airing
+                    .and_then(|a| a.get("airingAt"))
+                    .and_then(Value::as_i64),
             })
         })
         .collect())
@@ -411,20 +425,20 @@ mod tests {
         // Shape captured live from graphql.anilist.co (2026-07): a finished show,
         // a not-yet-released one (null episodes/score/airing), and a releasing one.
         let v = json!({"data":{"Page":{
-            "pageInfo":{"currentPage":1,"hasNextPage":true},
-            "media":[
-                {"id":154587,"title":{"romaji":"Sousou no Frieren","english":"Frieren"},
-                 "coverImage":{"large":"http://c/1.jpg"},"format":"TV","episodes":28,
-                 "averageScore":91,"seasonYear":2023,"status":"FINISHED",
-                 "genres":["Adventure","Drama","Fantasy"],"nextAiringEpisode":null,"isAdult":false},
-                {"id":189046,"title":{"romaji":"Re:Zero 4th Season","english":null},
-                 "coverImage":{"large":"http://c/2.jpg"},"format":"TV","episodes":19,
-                 "averageScore":90,"seasonYear":2026,"status":"RELEASING",
-                 "genres":["Drama","Fantasy","Psychological"],"nextAiringEpisode":{"episode":12},"isAdult":false},
-                {"id":113417,"title":{"romaji":"Overflow","english":null},
-                 "coverImage":{},"format":"ONA","episodes":null,"averageScore":null,
-                 "seasonYear":null,"status":"NOT_YET_RELEASED","genres":[],"nextAiringEpisode":null,"isAdult":true}
-            ]}}});
+        "pageInfo":{"currentPage":1,"hasNextPage":true},
+        "media":[
+            {"id":154587,"title":{"romaji":"Sousou no Frieren","english":"Frieren"},
+             "coverImage":{"large":"http://c/1.jpg"},"format":"TV","episodes":28,
+             "averageScore":91,"seasonYear":2023,"status":"FINISHED",
+             "genres":["Adventure","Drama","Fantasy"],"nextAiringEpisode":null,"isAdult":false},
+            {"id":189046,"title":{"romaji":"Re:Zero 4th Season","english":null},
+             "coverImage":{"large":"http://c/2.jpg"},"format":"TV","episodes":19,
+             "averageScore":90,"seasonYear":2026,"status":"RELEASING",
+             "genres":["Drama","Fantasy","Psychological"],"nextAiringEpisode":{"episode":12},"isAdult":false},
+            {"id":113417,"title":{"romaji":"Overflow","english":null},
+             "coverImage":{},"format":"ONA","episodes":null,"averageScore":null,
+             "seasonYear":null,"status":"NOT_YET_RELEASED","genres":[],"nextAiringEpisode":null,"isAdult":true}
+        ]}}});
         let p = parse_catalog_search(&v).unwrap();
         assert!(p.has_next_page);
         assert_eq!(p.current_page, 1);

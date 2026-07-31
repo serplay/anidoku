@@ -34,7 +34,10 @@ async fn main() {
 
     // Resolve show + episode.
     let provider = Arc::new(AllAnime::new());
-    let results = provider.search(&query, TranslationType::Sub).await.expect("search");
+    let results = provider
+        .search(&query, TranslationType::Sub)
+        .await
+        .expect("search");
     // Prefer the result with the most episodes: full-length series make a
     // better interrupt/resume test than 10 MB specials.
     let show = results
@@ -75,7 +78,13 @@ async fn main() {
         }
     });
 
-    let mgr = DownloadManager::new(db.clone(), proxy.clone(), provider.clone(), root.clone(), tx);
+    let mgr = DownloadManager::new(
+        db.clone(),
+        proxy.clone(),
+        provider.clone(),
+        root.clone(),
+        tx,
+    );
     mgr.start();
 
     let id = mgr
@@ -86,7 +95,9 @@ async fn main() {
 
     // Phase 1: wait for progress, then interrupt.
     wait_for(&db, id, Duration::from_secs(180), |r| {
-        r.bytes_done >= PAUSE_AT_BYTES || r.state == DownloadState::Done || r.state == DownloadState::Failed
+        r.bytes_done >= PAUSE_AT_BYTES
+            || r.state == DownloadState::Done
+            || r.state == DownloadState::Failed
     })
     .await;
     let row = db.get_download(id).unwrap().unwrap();
@@ -97,23 +108,39 @@ async fn main() {
     if row.state == DownloadState::Done {
         println!("\n== episode finished before the interrupt point (small file) — skipping pause/resume phases");
     } else {
-        println!("\n== interrupting at bytes={} segs={} (kind={:?}, quality={:?})",
-            row.bytes_done, row.segments_done, kind, row.quality);
+        println!(
+            "\n== interrupting at bytes={} segs={} (kind={:?}, quality={:?})",
+            row.bytes_done, row.segments_done, kind, row.quality
+        );
         mgr.pause(id).expect("pause");
-        wait_for(&db, id, Duration::from_secs(60), |r| r.state == DownloadState::Paused || r.state == DownloadState::Done).await;
+        wait_for(&db, id, Duration::from_secs(60), |r| {
+            r.state == DownloadState::Paused || r.state == DownloadState::Done
+        })
+        .await;
     }
 
     let paused = db.get_download(id).unwrap().unwrap();
-    let dir_rel = paused.dir_path.clone().unwrap_or_else(|| episode_dir_rel(&show.provider_id, &ep));
+    let dir_rel = paused
+        .dir_path
+        .clone()
+        .unwrap_or_else(|| episode_dir_rel(&show.provider_id, &ep));
     let dir = root.join(&dir_rel);
-    println!("== paused: state={:?} bytes_done={} segments_done={}", paused.state, paused.bytes_done, paused.segments_done);
+    println!(
+        "== paused: state={:?} bytes_done={} segments_done={}",
+        paused.state, paused.bytes_done, paused.segments_done
+    );
 
     // Checkpoint integrity: disk must match DB.
     let checkpoint_bytes = paused.bytes_done;
     match kind {
         StreamKind::Mp4 => {
-            let len = std::fs::metadata(dir.join("video.mp4")).expect("video.mp4 exists").len() as i64;
-            assert_eq!(len, paused.bytes_done, "file length must equal bytes_done checkpoint");
+            let len = std::fs::metadata(dir.join("video.mp4"))
+                .expect("video.mp4 exists")
+                .len() as i64;
+            assert_eq!(
+                len, paused.bytes_done,
+                "file length must equal bytes_done checkpoint"
+            );
             println!("== checkpoint OK: video.mp4 length {len} == bytes_done");
         }
         StreamKind::Hls => {
@@ -122,8 +149,14 @@ async fn main() {
                 .filter_map(|e| e.ok())
                 .filter(|e| e.file_name().to_string_lossy().starts_with("seg_"))
                 .count() as i64;
-            assert!(segs >= paused.segments_done, "at least segments_done segment files on disk (found {segs})");
-            println!("== checkpoint OK: {segs} segment files >= segments_done {}", paused.segments_done);
+            assert!(
+                segs >= paused.segments_done,
+                "at least segments_done segment files on disk (found {segs})"
+            );
+            println!(
+                "== checkpoint OK: {segs} segment files >= segments_done {}",
+                paused.segments_done
+            );
         }
     }
 
@@ -141,14 +174,23 @@ async fn main() {
         if resumed.state == DownloadState::Failed {
             panic!("resume failed: {:?}", resumed.error);
         }
-        assert!(resumed.bytes_done > checkpoint_bytes, "resume advanced past the checkpoint");
-        println!("== resume OK: bytes {} -> {}", checkpoint_bytes, resumed.bytes_done);
+        assert!(
+            resumed.bytes_done > checkpoint_bytes,
+            "resume advanced past the checkpoint"
+        );
+        println!(
+            "== resume OK: bytes {} -> {}",
+            checkpoint_bytes, resumed.bytes_done
+        );
 
         // Stop again (unless already done) so the partial file is stable for
         // the integrity check + serving probe.
         if resumed.state != DownloadState::Done {
             mgr.pause(id).expect("pause2");
-            wait_for(&db, id, Duration::from_secs(60), |r| r.state != DownloadState::Downloading).await;
+            wait_for(&db, id, Duration::from_secs(60), |r| {
+                r.state != DownloadState::Downloading
+            })
+            .await;
         }
     }
 
@@ -163,19 +205,31 @@ async fn main() {
         let span_start = (checkpoint_bytes - 32_768).max(0) as u64;
         let span_len: usize = 65_536;
         let resp = proxy
-            .get_ranged(&src.url, src.referer.as_deref(), Some(&format!("bytes={}-{}", span_start, span_start + span_len as u64 - 1)))
+            .get_ranged(
+                &src.url,
+                src.referer.as_deref(),
+                Some(&format!(
+                    "bytes={}-{}",
+                    span_start,
+                    span_start + span_len as u64 - 1
+                )),
+            )
             .await
             .expect("upstream ranged fetch");
         assert_eq!(resp.status().as_u16(), 206, "upstream must honor Range");
         let upstream = resp.bytes().await.expect("upstream bytes");
         let local = std::fs::read(dir.join("video.mp4")).unwrap();
-        let local_span = &local[span_start as usize..(span_start as usize + span_len).min(local.len())];
+        let local_span =
+            &local[span_start as usize..(span_start as usize + span_len).min(local.len())];
         assert_eq!(
             &upstream[..local_span.len()],
             local_span,
             "bytes spanning the pause point must match upstream (no resume corruption)"
         );
-        println!("== integrity OK: {} bytes spanning the pause point match upstream", local_span.len());
+        println!(
+            "== integrity OK: {} bytes spanning the pause point match upstream",
+            local_span.len()
+        );
     }
 
     // Phase 4: serve the downloaded tree through the media server.
@@ -188,7 +242,12 @@ async fn main() {
     };
     println!("\nSERVE_BASE={}", handle.base);
     println!("SERVE_URL={}/dl/{}/{}", handle.base, dir_rel, video_file);
-    println!("STATE={:?} BYTES={} DIR={}", final_row.state, final_row.bytes_done, dir.display());
+    println!(
+        "STATE={:?} BYTES={} DIR={}",
+        final_row.state,
+        final_row.bytes_done,
+        dir.display()
+    );
     println!("(serving for curl probes; Ctrl-C to stop)");
     std::future::pending::<()>().await;
 }

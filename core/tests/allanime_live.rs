@@ -30,7 +30,10 @@ async fn live_sources_one_piece() {
     println!("got {} sources", sources.len());
     for s in sources.iter().take(6) {
         let url = &s.url[..s.url.len().min(70)];
-        println!("  [{}] {} {:?} -> {}", s.provider_name, s.quality, s.kind, url);
+        println!(
+            "  [{}] {} {:?} -> {}",
+            s.provider_name, s.quality, s.kind, url
+        );
     }
     assert!(!sources.is_empty(), "sources empty — provider still broken");
 }

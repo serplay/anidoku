@@ -298,12 +298,23 @@ mod tests {
     #[test]
     fn enqueue_rejects_duplicates_and_resets_failed() {
         let db = Database::open_in_memory().unwrap();
-        let id = db.enqueue_download("show", "1", Some("best"), false).unwrap().unwrap();
+        let id = db
+            .enqueue_download("show", "1", Some("best"), false)
+            .unwrap()
+            .unwrap();
         // Duplicate while queued -> None.
-        assert_eq!(db.enqueue_download("show", "1", Some("best"), false).unwrap(), None);
+        assert_eq!(
+            db.enqueue_download("show", "1", Some("best"), false)
+                .unwrap(),
+            None
+        );
         // Failed rows are reset to queued instead of duplicated.
-        db.set_download_state(id, DownloadState::Failed, Some("boom")).unwrap();
-        let re = db.enqueue_download("show", "1", Some("720"), true).unwrap().unwrap();
+        db.set_download_state(id, DownloadState::Failed, Some("boom"))
+            .unwrap();
+        let re = db
+            .enqueue_download("show", "1", Some("720"), true)
+            .unwrap()
+            .unwrap();
         assert_eq!(re, id);
         let row = db.get_download(id).unwrap().unwrap();
         assert_eq!(row.state, DownloadState::Queued);
@@ -329,10 +340,15 @@ mod tests {
     #[test]
     fn progress_checkpoint_roundtrip_preserves_totals() {
         let db = Database::open_in_memory().unwrap();
-        let id = db.enqueue_download("show", "1", None, false).unwrap().unwrap();
-        db.update_download_progress(id, 1000, Some(5000), 0, None).unwrap();
+        let id = db
+            .enqueue_download("show", "1", None, false)
+            .unwrap()
+            .unwrap();
+        db.update_download_progress(id, 1000, Some(5000), 0, None)
+            .unwrap();
         // A later update without totals keeps them.
-        db.update_download_progress(id, 2000, None, 3, Some(24)).unwrap();
+        db.update_download_progress(id, 2000, None, 3, Some(24))
+            .unwrap();
         let row = db.get_download(id).unwrap().unwrap();
         assert_eq!(row.bytes_done, 2000);
         assert_eq!(row.bytes_total, Some(5000));
@@ -356,15 +372,30 @@ mod tests {
     #[test]
     fn storage_accounting_sums_done_only() {
         let db = Database::open_in_memory().unwrap();
-        db.cache_anime("showA", "Show A", Some("A!"), Some("http://c"), None).unwrap();
-        let a1 = db.enqueue_download("showA", "1", None, false).unwrap().unwrap();
-        let a2 = db.enqueue_download("showA", "2", None, false).unwrap().unwrap();
-        let b1 = db.enqueue_download("showB", "1", None, false).unwrap().unwrap();
-        db.update_download_progress(a1, 100, Some(100), 0, None).unwrap();
-        db.update_download_progress(a2, 250, Some(250), 0, None).unwrap();
-        db.update_download_progress(b1, 999, Some(2000), 0, None).unwrap();
-        db.set_download_state(a1, DownloadState::Done, None).unwrap();
-        db.set_download_state(a2, DownloadState::Done, None).unwrap();
+        db.cache_anime("showA", "Show A", Some("A!"), Some("http://c"), None)
+            .unwrap();
+        let a1 = db
+            .enqueue_download("showA", "1", None, false)
+            .unwrap()
+            .unwrap();
+        let a2 = db
+            .enqueue_download("showA", "2", None, false)
+            .unwrap()
+            .unwrap();
+        let b1 = db
+            .enqueue_download("showB", "1", None, false)
+            .unwrap()
+            .unwrap();
+        db.update_download_progress(a1, 100, Some(100), 0, None)
+            .unwrap();
+        db.update_download_progress(a2, 250, Some(250), 0, None)
+            .unwrap();
+        db.update_download_progress(b1, 999, Some(2000), 0, None)
+            .unwrap();
+        db.set_download_state(a1, DownloadState::Done, None)
+            .unwrap();
+        db.set_download_state(a2, DownloadState::Done, None)
+            .unwrap();
         // b1 still downloading: excluded.
         let storage = db.download_storage().unwrap();
         assert_eq!(storage.len(), 1);
@@ -379,8 +410,12 @@ mod tests {
     fn meta_and_listing_join_title() {
         let db = Database::open_in_memory().unwrap();
         db.cache_anime("show", "Romaji", None, None, None).unwrap();
-        let id = db.enqueue_download("show", "5.5", Some("best"), false).unwrap().unwrap();
-        db.set_download_meta(id, "show/5.5", StreamKind::Hls, "1080").unwrap();
+        let id = db
+            .enqueue_download("show", "5.5", Some("best"), false)
+            .unwrap()
+            .unwrap();
+        db.set_download_meta(id, "show/5.5", StreamKind::Hls, "1080")
+            .unwrap();
         let all = db.list_downloads().unwrap();
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].dir_path.as_deref(), Some("show/5.5"));

@@ -129,7 +129,13 @@ fn promote(status: MediaListStatus, progress: i64, episode_count: Option<i64>) -
 mod tests {
     use super::*;
 
-    fn local(status: MediaListStatus, progress: i64, local_ts: i64, remote_ts: Option<i64>, dirty: bool) -> ListEntry {
+    fn local(
+        status: MediaListStatus,
+        progress: i64,
+        local_ts: i64,
+        remote_ts: Option<i64>,
+        dirty: bool,
+    ) -> ListEntry {
         ListEntry {
             anilist_id: 1,
             status,

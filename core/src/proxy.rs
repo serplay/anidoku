@@ -82,7 +82,9 @@ impl ProxyClient {
     ) -> Result<reqwest::Response> {
         let mut req = self.client.get(url);
         if let Some(r) = referer {
-            req = req.header(reqwest::header::REFERER, r).header(reqwest::header::ORIGIN, r);
+            req = req
+                .header(reqwest::header::REFERER, r)
+                .header(reqwest::header::ORIGIN, r);
         }
         if let Some(rg) = range {
             req = req.header(reqwest::header::RANGE, rg);
@@ -114,7 +116,11 @@ where
             None => (line, ""),
         };
         let trimmed = content.trim_end_matches('\r');
-        let cr = if content.len() != trimmed.len() { "\r" } else { "" };
+        let cr = if content.len() != trimmed.len() {
+            "\r"
+        } else {
+            ""
+        };
 
         if trimmed.is_empty() {
             out.push_str(line);
@@ -175,10 +181,7 @@ pub fn resolve_url(base_url: &str, target: &str) -> String {
         None => return target.to_string(),
     };
     // Strip query/fragment from base path.
-    let base_path = base_path
-        .split(['?', '#'])
-        .next()
-        .unwrap_or(base_path);
+    let base_path = base_path.split(['?', '#']).next().unwrap_or(base_path);
 
     if let Some(rooted) = target.strip_prefix('/') {
         return format!("{scheme_authority}/{rooted}");
@@ -211,7 +214,10 @@ mod tests {
             "https://cdn.example/hls/seg0.ts"
         );
         assert_eq!(
-            resolve_url("https://cdn.example/hls/master.m3u8?token=1", "480/index.m3u8"),
+            resolve_url(
+                "https://cdn.example/hls/master.m3u8?token=1",
+                "480/index.m3u8"
+            ),
             "https://cdn.example/hls/480/index.m3u8"
         );
         assert_eq!(
@@ -222,7 +228,8 @@ mod tests {
 
     #[test]
     fn rewrites_segment_and_variant_lines() {
-        let playlist = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n480/index.m3u8\n#EXTINF:6.0,\nseg0.ts\n";
+        let playlist =
+            "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n480/index.m3u8\n#EXTINF:6.0,\nseg0.ts\n";
         let out = rewrite_playlist(playlist, "https://cdn/hls/master.m3u8", |abs| {
             format!("stream://proxy?u={abs}")
         });
@@ -234,7 +241,8 @@ mod tests {
 
     #[test]
     fn rewrites_uri_attribute_in_tags() {
-        let playlist = "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\",IV=0x1\n#EXTINF:6,\nseg.ts\n";
+        let playlist =
+            "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\",IV=0x1\n#EXTINF:6,\nseg.ts\n";
         let out = rewrite_playlist(playlist, "https://cdn/h/p.m3u8", |abs| format!("P[{abs}]"));
         assert!(out.contains("URI=\"P[https://cdn/h/key.bin]\""));
         assert!(out.contains("P[https://cdn/h/seg.ts]"));
@@ -251,7 +259,10 @@ mod tests {
     #[test]
     fn detects_hls() {
         assert!(is_hls_playlist("https://x/master.m3u8", "text/plain"));
-        assert!(is_hls_playlist("https://x/p", "application/vnd.apple.mpegurl"));
+        assert!(is_hls_playlist(
+            "https://x/p",
+            "application/vnd.apple.mpegurl"
+        ));
         assert!(!is_hls_playlist("https://x/seg.ts", "video/mp2t"));
     }
 }

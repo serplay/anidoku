@@ -28,7 +28,12 @@ async fn main() {
         .episodes(&show.provider_id, TranslationType::Sub)
         .await
         .expect("episodes");
-    println!("episodes: {} (first={:?}, last={:?})", eps.len(), eps.first(), eps.last());
+    println!(
+        "episodes: {} (first={:?}, last={:?})",
+        eps.len(),
+        eps.first(),
+        eps.last()
+    );
 
     let Some(ep) = eps.first() else { return };
     match p.sources(&show.provider_id, ep, TranslationType::Sub).await {

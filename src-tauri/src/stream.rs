@@ -48,10 +48,7 @@ fn parse_query(uri: &str) -> HashMap<String, String> {
     map
 }
 
-async fn build_response(
-    proxy: &ProxyClient,
-    uri: &str,
-) -> tauri::http::Response<Vec<u8>> {
+async fn build_response(proxy: &ProxyClient, uri: &str) -> tauri::http::Response<Vec<u8>> {
     let params = parse_query(uri);
     let Some(url) = params.get("url") else {
         return error_response(400, "missing url parameter");
@@ -65,9 +62,8 @@ async fn build_response(
 
     if proxy::is_hls_playlist(url, &fetched.content_type) {
         let playlist = String::from_utf8_lossy(&fetched.bytes);
-        let rewritten = proxy::rewrite_playlist(&playlist, url, |abs| {
-            make_stream_url(abs, referer)
-        });
+        let rewritten =
+            proxy::rewrite_playlist(&playlist, url, |abs| make_stream_url(abs, referer));
         return ok_response("application/vnd.apple.mpegurl", rewritten.into_bytes());
     }
 
@@ -110,6 +106,6 @@ mod tests {
         let s = make_stream_url("https://x/y.ts", None);
         let params = parse_query(&s);
         assert_eq!(params.get("url").unwrap(), "https://x/y.ts");
-        assert!(params.get("referer").is_none());
+        assert!(!params.contains_key("referer"));
     }
 }

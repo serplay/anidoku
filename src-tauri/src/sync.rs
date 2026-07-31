@@ -76,7 +76,11 @@ pub fn push_local(state: &AppState, app: &AppHandle, entry: &ListEntry) {
             .map(|q| q.iter().any(|m| m.anilist_id == outcome.anilist_id))
             .unwrap_or(true);
         let _ = app.emit(
-            if still_queued { "sync:queued" } else { "sync:pushed" },
+            if still_queued {
+                "sync:queued"
+            } else {
+                "sync:pushed"
+            },
             outcome,
         );
     });
@@ -245,7 +249,7 @@ pub fn spawn_worker(app: AppHandle) {
             tokio::time::sleep(Duration::from_secs(60)).await;
             ticks += 1;
             drain(&app).await;
-            if ticks % 15 == 0 {
+            if ticks.is_multiple_of(15) {
                 let _ = pull(&app).await;
             }
         }

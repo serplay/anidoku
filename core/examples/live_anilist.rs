@@ -36,8 +36,13 @@ async fn main() {
                 println!(
                     "  trending [{}] {} — status {:?}, next ep {:?} @ {:?}",
                     m.anilist_id,
-                    m.title_english.as_deref().or(m.title_romaji.as_deref()).unwrap_or("?"),
-                    m.status, m.next_episode, m.airing_at
+                    m.title_english
+                        .as_deref()
+                        .or(m.title_romaji.as_deref())
+                        .unwrap_or("?"),
+                    m.status,
+                    m.next_episode,
+                    m.airing_at
                 );
             }
             // Batched airing lookup over the trending ids.
@@ -56,8 +61,11 @@ async fn main() {
             for m in results.iter().take(5) {
                 println!(
                     "  [{}] {} / {:?} — {:?} eps, format {:?}",
-                    m.anilist_id, m.title_romaji.as_deref().unwrap_or("?"),
-                    m.title_english, m.episode_count, m.format
+                    m.anilist_id,
+                    m.title_romaji.as_deref().unwrap_or("?"),
+                    m.title_english,
+                    m.episode_count,
+                    m.format
                 );
             }
             if let Some(first) = results.first() {

@@ -67,7 +67,11 @@ pub fn can_transition(from: DownloadState, to: DownloadState) -> bool {
 
 /// Parse the leading number of a quality label ("1080", "1080p" → 1080).
 pub fn quality_num(q: &str) -> Option<i64> {
-    let digits: String = q.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = q
+        .trim()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     digits.parse().ok()
 }
 
@@ -105,7 +109,13 @@ pub fn pick_source<'a>(sources: &'a [VideoSource], desired: &str) -> Option<&'a 
 pub fn sanitize_component(s: &str) -> String {
     let out: String = s
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     // Avoid empty names and dot-only names like "..".
     if out.is_empty() || out.chars().all(|c| c == '.') {
@@ -117,7 +127,11 @@ pub fn sanitize_component(s: &str) -> String {
 
 /// Episode directory relative to the downloads root.
 pub fn episode_dir_rel(anime_id: &str, episode: &str) -> String {
-    format!("{}/{}", sanitize_component(anime_id), sanitize_component(episode))
+    format!(
+        "{}/{}",
+        sanitize_component(anime_id),
+        sanitize_component(episode)
+    )
 }
 
 /// Written to `<episode dir>/manifest.json` on completion; the offline
@@ -259,9 +273,13 @@ impl DownloadManager {
         }
         let row = self.row(id)?;
         if !can_transition(row.state, DownloadState::Paused) {
-            return Err(Error::Download(format!("cannot pause a {} download", row.state.as_str())));
+            return Err(Error::Download(format!(
+                "cannot pause a {} download",
+                row.state.as_str()
+            )));
         }
-        self.db.set_download_state(id, DownloadState::Paused, None)?;
+        self.db
+            .set_download_state(id, DownloadState::Paused, None)?;
         self.emit_row_state(id, false);
         Ok(())
     }
@@ -270,9 +288,13 @@ impl DownloadManager {
     pub fn resume(&self, id: i64) -> Result<()> {
         let row = self.row(id)?;
         if !can_transition(row.state, DownloadState::Queued) {
-            return Err(Error::Download(format!("cannot resume a {} download", row.state.as_str())));
+            return Err(Error::Download(format!(
+                "cannot resume a {} download",
+                row.state.as_str()
+            )));
         }
-        self.db.set_download_state(id, DownloadState::Queued, None)?;
+        self.db
+            .set_download_state(id, DownloadState::Queued, None)?;
         self.emit_row_state(id, false);
         self.wake.notify_one();
         Ok(())
@@ -373,7 +395,9 @@ impl DownloadManager {
                 if active >= MAX_ACTIVE_DOWNLOADS {
                     break;
                 }
-                let Ok(Some(row)) = self.db.claim_next_queued() else { break };
+                let Ok(Some(row)) = self.db.claim_next_queued() else {
+                    break;
+                };
                 let flag = Arc::new(AtomicU8::new(CTL_RUN));
                 self.controls.lock().unwrap().insert(row.id, flag.clone());
                 self.emit_state(&row, None, false);
@@ -397,11 +421,15 @@ impl DownloadManager {
         self.controls.lock().unwrap().remove(&row.id);
         match outcome {
             Ok(JobOutcome::Done) => {
-                let _ = self.db.set_download_state(row.id, DownloadState::Done, None);
+                let _ = self
+                    .db
+                    .set_download_state(row.id, DownloadState::Done, None);
                 self.emit_row_state(row.id, false);
             }
             Ok(JobOutcome::Paused) => {
-                let _ = self.db.set_download_state(row.id, DownloadState::Paused, None);
+                let _ = self
+                    .db
+                    .set_download_state(row.id, DownloadState::Paused, None);
                 self.emit_row_state(row.id, false);
             }
             Ok(JobOutcome::Canceled) => {
@@ -410,9 +438,9 @@ impl DownloadManager {
                 }
             }
             Err(e) => {
-                let _ = self
-                    .db
-                    .set_download_state(row.id, DownloadState::Failed, Some(&e.to_string()));
+                let _ =
+                    self.db
+                        .set_download_state(row.id, DownloadState::Failed, Some(&e.to_string()));
                 self.emit_row_state(row.id, false);
             }
         }
@@ -420,7 +448,11 @@ impl DownloadManager {
 
     async fn execute(&self, row: &DownloadRow, flag: &AtomicU8) -> Result<JobOutcome> {
         use crate::models::TranslationType;
-        let mode = if row.dub { TranslationType::Dub } else { TranslationType::Sub };
+        let mode = if row.dub {
+            TranslationType::Dub
+        } else {
+            TranslationType::Sub
+        };
         let desired = row.quality.as_deref().unwrap_or("best");
 
         // Source URLs expire, so every (re)start re-resolves via the provider.
@@ -447,9 +479,7 @@ impl DownloadManager {
         let mut tracker = Tracker::new(self, row);
         let (outcome, video_file, quality_label) = match source.kind {
             StreamKind::Mp4 => {
-                let out = self
-                    .run_mp4(&dir, &source, row, flag, &mut tracker)
-                    .await?;
+                let out = self.run_mp4(&dir, &source, row, flag, &mut tracker).await?;
                 (out, "video.mp4".to_string(), source.quality.clone())
             }
             StreamKind::Hls => {
@@ -493,7 +523,11 @@ impl DownloadManager {
             Err(_) => 0,
         };
 
-        let range = if offset > 0 { Some(format!("bytes={offset}-")) } else { None };
+        let range = if offset > 0 {
+            Some(format!("bytes={offset}-"))
+        } else {
+            None
+        };
         let resp = self
             .proxy
             .get_ranged(&source.url, source.referer.as_deref(), range.as_deref())
@@ -523,6 +557,9 @@ impl DownloadManager {
 
         let mut file = tokio::fs::OpenOptions::new()
             .create(true)
+            // Never truncate: a resumed download reuses the bytes already on
+            // disk (we set_len + seek to `offset` below).
+            .truncate(false)
             .write(true)
             .open(&path)
             .await?;
@@ -619,7 +656,8 @@ impl DownloadManager {
                 .or_insert_with(|| format!("seg_{i:05}.{}", seg_ext(url)));
         }
         for (i, url) in keys.iter().enumerate() {
-            map.entry(url.clone()).or_insert_with(|| format!("key_{i:02}.bin"));
+            map.entry(url.clone())
+                .or_insert_with(|| format!("key_{i:02}.bin"));
         }
 
         // Keys/init sections are small: always (re)download them.
@@ -716,7 +754,11 @@ impl DownloadManager {
 /// File extension for a local segment file (playback doesn't strictly need it,
 /// but keeping fMP4 segments as .m4s is tidier).
 fn seg_ext(url: &str) -> &'static str {
-    let path = url.split(['?', '#']).next().unwrap_or(url).to_ascii_lowercase();
+    let path = url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url)
+        .to_ascii_lowercase();
     if path.ends_with(".m4s") {
         "m4s"
     } else if path.ends_with(".mp4") {

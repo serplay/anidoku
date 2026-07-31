@@ -199,7 +199,7 @@ pub fn spawn_worker(app: AppHandle) {
             tokio::time::sleep(Duration::from_secs(60)).await;
             ticks += 1;
             fire_due(&app).await;
-            if ticks % 360 == 0 {
+            if ticks.is_multiple_of(360) {
                 refresh(&app).await; // every 6h
             }
         }

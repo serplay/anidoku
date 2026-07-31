@@ -160,7 +160,9 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
     for (i, sql) in MIGRATIONS.iter().enumerate() {
         let target = (i + 1) as i64;
         if version < target {
-            conn.execute_batch(&format!("BEGIN; {sql} PRAGMA user_version = {target}; COMMIT;"))?;
+            conn.execute_batch(&format!(
+                "BEGIN; {sql} PRAGMA user_version = {target}; COMMIT;"
+            ))?;
         }
     }
     Ok(())

@@ -44,6 +44,9 @@ impl ByteRange {
 /// no (or a malformed / multi-range) header — caller should serve the full
 /// body — and `Err(())` when the range is syntactically valid but not
 /// satisfiable (caller should return `416`).
+// The `()` error is deliberate: the only failure mode is "unsatisfiable ->
+// 416", which carries no extra information worth an error type.
+#[allow(clippy::result_unit_err)]
 pub fn parse_range(header: &str, total: u64) -> std::result::Result<Option<ByteRange>, ()> {
     let Some(spec) = header.trim().strip_prefix("bytes=") else {
         return Ok(None);
@@ -72,7 +75,11 @@ pub fn parse_range(header: &str, total: u64) -> std::result::Result<Option<ByteR
                 return Err(());
             }
             let start = total.saturating_sub(suffix);
-            ByteRange { start, end: last, total }
+            ByteRange {
+                start,
+                end: last,
+                total,
+            }
         }
         // "bytes=START-": from START to the end.
         (false, true) => {
@@ -80,7 +87,11 @@ pub fn parse_range(header: &str, total: u64) -> std::result::Result<Option<ByteR
             if start > last {
                 return Err(());
             }
-            ByteRange { start, end: last, total }
+            ByteRange {
+                start,
+                end: last,
+                total,
+            }
         }
         // "bytes=START-END": closed range, END clamped.
         (false, false) => {
