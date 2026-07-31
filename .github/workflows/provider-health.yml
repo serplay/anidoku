@@ -1,0 +1,68 @@
+name: Provider health
+
+# Early-warning system for allanime rotations. The provider actively rotates its
+# anti-scraping crypto (build id, key mask, lane/x-aa-boot scheme, hosts), and
+# each rotation is a total streaming outage until re-ported. This runs the live
+# end-to-end sources test on a schedule so a break is caught here — and, if a
+# remote config is configured, its self-heal is validated too — rather than by a
+# user reporting "streaming stopped working". On failure it opens (or bumps) a
+# tracking issue.
+
+on:
+  schedule:
+    # Every 6 hours.
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  live-sources:
+    name: allanime live sources
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Run live sources test
+        id: live
+        run: |
+          set -o pipefail
+          cargo test -p anidoku-core --test allanime_live -- --ignored --nocapture 2>&1 | tee live.log
+
+      - name: Open/refresh tracking issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = "⚠️ allanime provider health check failing";
+            const body = [
+              "The scheduled live sources test failed — allanime has likely rotated its",
+              "crypto/scheme again, or the streaming API is down.",
+              "",
+              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              "",
+              "Fix recipe lives in `core/src/provider/allanime/constants.rs` (doc-comment)",
+              "and the `anidoku-allanime-crypto` project memory. Once re-ported, publish",
+              "the updated `allanime-config.json` so installed apps self-heal.",
+            ].join("\n");
+            const { owner, repo } = context.repo;
+            const existing = await github.rest.issues.listForRepo({
+              owner, repo, state: "open", labels: "provider-health",
+            });
+            if (existing.data.length > 0) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.data[0].number,
+                body: `Still failing as of ${new Date().toISOString()}.\n\n${body}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner, repo, title, body, labels: ["provider-health"],
+              });
+            }
