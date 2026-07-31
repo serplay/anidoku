@@ -119,6 +119,18 @@ pub fn run() {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     let dl_db = state.db.clone();
 
+    // Pull any published allanime remote-config override in the background so a
+    // provider rotation the maintainer has already fixed is picked up without a
+    // release. No-ops (no network) when REMOTE_CONFIG_URL is unset; failures are
+    // swallowed, leaving the baked-in defaults. The self-heal path in `sources`
+    // also refreshes on demand, so this is just a head start.
+    {
+        let provider = state.provider.clone();
+        tauri::async_runtime::spawn(async move {
+            provider.refresh_config(true).await;
+        });
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_notification::init())

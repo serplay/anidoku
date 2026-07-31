@@ -8,6 +8,7 @@
 //!              each sourceUrl into a /clock.json path, fetch it with the
 //!              allanime referer, parse the links.
 
+mod config;
 mod constants;
 mod decrypt;
 mod parse;
@@ -16,14 +17,27 @@ use crate::models::{AnimeSummary, TranslationType, VideoSource};
 use crate::provider::Provider;
 use crate::{Error, Result};
 use async_trait::async_trait;
+use config::AllAnimeConfig;
 use reqwest::Client;
 use serde_json::{json, Value};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::RwLock;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub use constants::*;
 
+/// Minimum spacing between forced remote-config refreshes, so a stream that
+/// keeps failing (dead episode, offline) can't hammer the config host.
+const REFRESH_THROTTLE: Duration = Duration::from_secs(30);
+
 pub struct AllAnime {
     client: Client,
+    /// Live, runtime-overridable copy of the volatile allanime constants. Starts
+    /// from the baked-in defaults and is swapped in place by [`Self::refresh_config`].
+    config: RwLock<AllAnimeConfig>,
+    /// Where to pull remote config overrides from; empty = feature disabled.
+    config_url: String,
+    /// Last time a remote refresh actually hit the network (for throttling).
+    last_refresh: RwLock<Option<Instant>>,
 }
 
 impl Default for AllAnime {
@@ -46,11 +60,11 @@ struct Bootstrap {
 /// web client's `[qS(), zh()]`: the current 3-day bucket (`zh`), plus the
 /// previous one while still inside the new bucket's first day (`qS`, a grace
 /// window for freshly rotated epochs). Deduped, tried in candidate order.
-fn epoch_candidates(now_ms: u128) -> Vec<u64> {
+fn epoch_candidates(bucket_ms: u128, now_ms: u128) -> Vec<u64> {
     // web client `US = 864e5` (1 day)
     const GRACE_MS: u128 = 86_400_000;
-    let zh = (now_ms / EPOCH_BUCKET_MS) as u64;
-    let qs = if zh > 0 && now_ms - (zh as u128) * EPOCH_BUCKET_MS < GRACE_MS {
+    let zh = (now_ms / bucket_ms) as u64;
+    let qs = if zh > 0 && now_ms - (zh as u128) * bucket_ms < GRACE_MS {
         zh - 1
     } else {
         zh
@@ -68,7 +82,96 @@ impl AllAnime {
             .user_agent(USER_AGENT)
             .build()
             .expect("reqwest client");
-        Self { client }
+        // Env override wins over the baked-in const so desktop dev can point at
+        // a test config without a rebuild.
+        let config_url = std::env::var("ANIDOKU_ALLANIME_CONFIG_URL")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| REMOTE_CONFIG_URL.to_string());
+        Self {
+            client,
+            config: RwLock::new(AllAnimeConfig::default()),
+            config_url,
+            last_refresh: RwLock::new(None),
+        }
+    }
+
+    /// Test-only constructor pointing the remote-config fetch at an explicit URL
+    /// (avoids mutating the process-global env var across parallel tests).
+    #[cfg(test)]
+    fn new_with_config_url(url: impl Into<String>) -> Self {
+        let mut s = Self::new();
+        s.config_url = url.into();
+        s
+    }
+
+    /// A consistent snapshot of the current config for the duration of one
+    /// request. Cloning up front means a concurrent [`Self::refresh_config`]
+    /// can't change host/key material midway through a single sources fetch.
+    fn config(&self) -> AllAnimeConfig {
+        self.config.read().map(|c| c.clone()).unwrap_or_default()
+    }
+
+    /// Pull the remote config override and swap it in if it parses, validates,
+    /// and differs from what we have. Returns `true` when the live config
+    /// changed. Never errors out of band: any network/parse failure just leaves
+    /// the current (baked-in or previously-fetched) config untouched, so a bad
+    /// fetch can never take streaming down.
+    ///
+    /// `force` bypasses the [`REFRESH_THROTTLE`] spacing used by the self-heal
+    /// retry path; startup passes `force` too (there's no prior refresh yet).
+    pub async fn refresh_config(&self, force: bool) -> bool {
+        if self.config_url.trim().is_empty() {
+            return false;
+        }
+        if !force {
+            if let Ok(last) = self.last_refresh.read() {
+                if last.is_some_and(|t| t.elapsed() < REFRESH_THROTTLE) {
+                    return false;
+                }
+            }
+        }
+        if let Ok(mut last) = self.last_refresh.write() {
+            *last = Some(Instant::now());
+        }
+
+        let text = match self.client.get(&self.config_url).send().await {
+            Ok(resp) => match resp.error_for_status() {
+                Ok(resp) => match resp.text().await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        eprintln!("[allanime] remote config read failed: {e}");
+                        return false;
+                    }
+                },
+                Err(e) => {
+                    eprintln!("[allanime] remote config http error: {e}");
+                    return false;
+                }
+            },
+            Err(e) => {
+                eprintln!("[allanime] remote config fetch failed: {e}");
+                return false;
+            }
+        };
+        let parsed = match AllAnimeConfig::parse_validated(&text) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[allanime] remote config rejected: {e}");
+                return false;
+            }
+        };
+        if self.config() == parsed {
+            return false;
+        }
+        if let Ok(mut c) = self.config.write() {
+            eprintln!(
+                "[allanime] remote config applied (build_id {} -> {})",
+                c.build_id, parsed.build_id
+            );
+            *c = parsed;
+        }
+        true
     }
 
     /// Fetch the current `{ epoch, partB }` used to sign the aaReq token and
@@ -79,19 +182,30 @@ impl AllAnime {
     /// try the current bucket and — inside its first day — the previous one
     /// (matching the web client's `[qS(), zh()]` candidate list), and take the
     /// first that authenticates. The response echoes the authoritative epoch.
-    async fn fetch_bootstrap(&self, lane: &str, now_ms: u128) -> Result<Bootstrap> {
+    async fn fetch_bootstrap(
+        &self,
+        cfg: &AllAnimeConfig,
+        lane: &str,
+        now_ms: u128,
+    ) -> Result<Bootstrap> {
         let mut last_err: Option<Error> = None;
-        for epoch in epoch_candidates(now_ms) {
-            let aa_boot =
-                decrypt::sign_aa_boot(QD_MASK_HEX, BUILD_ID, KEY_GROUP, REFERER_HOST, epoch, lane)?;
+        for epoch in epoch_candidates(cfg.epoch_bucket_ms, now_ms) {
+            let aa_boot = decrypt::sign_aa_boot(
+                &cfg.qd_mask_hex,
+                &cfg.build_id,
+                &cfg.key_group,
+                &cfg.referer_host,
+                epoch,
+                lane,
+            )?;
             let resp = self
                 .client
-                .get(BOOTSTRAP_URL)
-                .header("Referer", REFERER)
-                .header("Origin", REFERER)
-                .header("x-build-id", BUILD_ID)
+                .get(&cfg.bootstrap_url)
+                .header("Referer", &cfg.referer)
+                .header("Origin", &cfg.referer)
+                .header("x-build-id", &cfg.build_id)
                 .header("x-aa-boot", aa_boot)
-                .query(&[("buildId", BUILD_ID), ("k", lane)])
+                .query(&[("buildId", cfg.build_id.as_str()), ("k", lane)])
                 .send()
                 .await?;
             if !resp.status().is_success() {
@@ -115,6 +229,7 @@ impl AllAnime {
     /// and, downstream, "sources: missing episode.sourceUrls").
     async fn get_episode_persisted(
         &self,
+        cfg: &AllAnimeConfig,
         show_id: &str,
         episode: &str,
         mode: TranslationType,
@@ -125,14 +240,15 @@ impl AllAnime {
             mode.as_str()
         );
         let extensions = format!(
-            r#"{{"persistedQuery":{{"version":1,"sha256Hash":"{EPISODE_QUERY_HASH}"}},"k":"{EPISODE_LANE}","aaReq":"{aa_req}"}}"#
+            r#"{{"persistedQuery":{{"version":1,"sha256Hash":"{}"}},"k":"{}","aaReq":"{aa_req}"}}"#,
+            cfg.episode_query_hash, cfg.episode_lane
         );
         let resp = self
             .client
-            .get(API_URL)
-            .header("Referer", REFERER)
-            .header("Origin", REFERER)
-            .header("x-build-id", BUILD_ID)
+            .get(&cfg.api_url)
+            .header("Referer", &cfg.referer)
+            .header("Origin", &cfg.referer)
+            .header("x-build-id", &cfg.build_id)
             .query(&[
                 ("variables", variables.as_str()),
                 ("extensions", &extensions),
@@ -143,14 +259,19 @@ impl AllAnime {
         Ok(resp.text().await?)
     }
 
-    async fn post_gql(&self, variables: Value, query: &str) -> Result<String> {
+    async fn post_gql(
+        &self,
+        cfg: &AllAnimeConfig,
+        variables: Value,
+        query: &str,
+    ) -> Result<String> {
         let body = json!({ "variables": variables, "query": query });
         let resp = self
             .client
-            .post(API_URL)
-            .header("Referer", REFERER)
-            .header("Origin", REFERER)
-            .header("x-build-id", BUILD_ID)
+            .post(&cfg.api_url)
+            .header("Referer", &cfg.referer)
+            .header("Origin", &cfg.referer)
+            .header("x-build-id", &cfg.build_id)
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
@@ -159,14 +280,14 @@ impl AllAnime {
         Ok(resp.text().await?)
     }
 
-    /// Fetch a deobfuscated `/clock.json?...` embed path against BASE_HOST.
-    async fn fetch_clock(&self, path: &str) -> Result<String> {
-        let url = format!("https://{BASE_HOST}{path}");
+    /// Fetch a deobfuscated `/clock.json?...` embed path against the base host.
+    async fn fetch_clock(&self, cfg: &AllAnimeConfig, path: &str) -> Result<String> {
+        let url = format!("https://{}{path}", cfg.base_host);
         let resp = self
             .client
             .get(&url)
-            .header("Referer", REFERER)
-            .header("Origin", REFERER)
+            .header("Referer", &cfg.referer)
+            .header("Origin", &cfg.referer)
             .send()
             .await?
             .error_for_status()?;
@@ -254,13 +375,15 @@ impl Provider for AllAnime {
             "translationType": mode.as_str(),
             "countryOrigin": "ALL"
         });
-        let body = self.post_gql(variables, SEARCH_GQL).await?;
+        let body = self.post_gql(&self.config(), variables, SEARCH_GQL).await?;
         parse::parse_search(&body)
     }
 
     async fn episodes(&self, show_id: &str, mode: TranslationType) -> Result<Vec<String>> {
         let variables = json!({ "showId": show_id });
-        let body = self.post_gql(variables, EPISODES_LIST_GQL).await?;
+        let body = self
+            .post_gql(&self.config(), variables, EPISODES_LIST_GQL)
+            .await?;
         parse::parse_episodes(&body, mode.as_str())
     }
 
@@ -270,27 +393,56 @@ impl Provider for AllAnime {
         episode: &str,
         mode: TranslationType,
     ) -> Result<Vec<VideoSource>> {
-        // Fetch the per-epoch key and sign the aaReq token, then GET the
-        // persisted query (which returns an encrypted `tobeparsed` blob). The
-        // old ad-hoc POST fallback no longer works — allanime rejects it with
-        // AA_CRYPTO_MISSING — so there is only this one path now.
+        // Self-heal on provider rotation: run against the current config, and if
+        // it fails or comes back empty (the shape a fresh crypto rotation takes —
+        // bootstrap rejected, or `tobeparsed`/sourceUrls missing), pull the
+        // remote config override and retry once. A rotation the maintainer has
+        // already published thus fixes itself on the next play attempt, no app
+        // update required. When there's no remote config (or it's unchanged) the
+        // first result stands.
+        let first = self
+            .sources_with(&self.config(), show_id, episode, mode)
+            .await;
+        if matches!(&first, Ok(v) if !v.is_empty()) {
+            return first;
+        }
+        if self.refresh_config(false).await {
+            return self
+                .sources_with(&self.config(), show_id, episode, mode)
+                .await;
+        }
+        first
+    }
+}
+
+impl AllAnime {
+    /// One full sources fetch against a fixed config snapshot: bootstrap the
+    /// per-epoch key, sign the aaReq, GET the persisted query, decrypt, and
+    /// resolve every embed ref into concrete playable links.
+    async fn sources_with(
+        &self,
+        cfg: &AllAnimeConfig,
+        show_id: &str,
+        episode: &str,
+        mode: TranslationType,
+    ) -> Result<Vec<VideoSource>> {
         let now_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|e| Error::Provider(format!("sources: system clock before epoch: {e}")))?
             .as_millis();
-        let boot = self.fetch_bootstrap(EPISODE_LANE, now_ms).await?;
-        let key = decrypt::derive_key_xor(&boot.part_b, QD_MASK_HEX)?;
+        let boot = self.fetch_bootstrap(cfg, &cfg.episode_lane, now_ms).await?;
+        let key = decrypt::derive_key_xor(&boot.part_b, &cfg.qd_mask_hex)?;
         let aa_req = decrypt::sign_aa_req(
             &key,
             boot.epoch,
-            BUILD_ID,
-            EPISODE_QUERY_HASH,
-            EPISODE_LANE,
+            &cfg.build_id,
+            &cfg.episode_query_hash,
+            &cfg.episode_lane,
             now_ms,
         )?;
 
         let body = self
-            .get_episode_persisted(show_id, episode, mode, &aa_req)
+            .get_episode_persisted(cfg, show_id, episode, mode, &aa_req)
             .await?;
         let refs = self
             .unwrap_sources_response(&body, &key)
@@ -300,7 +452,7 @@ impl Provider for AllAnime {
         // that fail rather than aborting the whole set.
         let mut tasks = Vec::new();
         for r in refs {
-            tasks.push(self.resolve_ref(r));
+            tasks.push(self.resolve_ref(cfg, r));
         }
         let mut sources = Vec::new();
         for mut links in futures_join(tasks).await.into_iter().flatten() {
@@ -320,10 +472,12 @@ impl Provider for AllAnime {
         });
         Ok(sources)
     }
-}
 
-impl AllAnime {
-    async fn resolve_ref(&self, r: parse::SourceRef) -> Result<Vec<VideoSource>> {
+    async fn resolve_ref(
+        &self,
+        cfg: &AllAnimeConfig,
+        r: parse::SourceRef,
+    ) -> Result<Vec<VideoSource>> {
         // Direct-download hosts (ani-cli's fast4speed/Yt case) are already
         // playable and need no clock indirection.
         if r.url.starts_with("http://") || r.url.starts_with("https://") {
@@ -348,7 +502,7 @@ impl AllAnime {
                 quality: "auto".into(),
                 url: r.url,
                 kind,
-                referer: Some(REFERER.to_string()),
+                referer: Some(cfg.referer.clone()),
                 subtitles: Vec::new(),
             }]);
         }
@@ -357,11 +511,11 @@ impl AllAnime {
         if !path.starts_with('/') {
             return Ok(Vec::new());
         }
-        let clock_body = self.fetch_clock(&path).await?;
+        let clock_body = self.fetch_clock(cfg, &path).await?;
         Ok(parse::parse_clock_links(
             &clock_body,
             &r.name,
-            Some(REFERER),
+            Some(&cfg.referer),
         ))
     }
 
@@ -545,6 +699,60 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn epoch_candidates_adds_grace_bucket_early_in_window() {
+        let bucket = 259_200_000u128;
+        // 1 hour into a fresh bucket -> current + previous (grace) candidate.
+        let early = 10 * bucket + 3_600_000;
+        assert_eq!(epoch_candidates(bucket, early), vec![9, 10]);
+        // 2 days in (past the 1-day grace) -> just the current bucket.
+        let late = 10 * bucket + 2 * 86_400_000;
+        assert_eq!(epoch_candidates(bucket, late), vec![10]);
+    }
+
+    #[tokio::test]
+    async fn remote_config_refresh_applies_over_http() {
+        use std::io::{Read, Write};
+
+        // A published rotation: same valid mask, new build_id.
+        let body = format!(r#"{{"build_id":"999","qd_mask_hex":"{QD_MASK_HEX}"}}"#);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let _ = sock.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes());
+            }
+        });
+
+        let provider = AllAnime::new_with_config_url(format!("http://{addr}/config.json"));
+        // Starts from baked-in defaults.
+        assert_eq!(provider.config().build_id, BUILD_ID);
+        // Fetch, validate, and swap in the override.
+        let changed = provider.refresh_config(true).await;
+        assert!(changed, "refresh should apply the fetched override");
+        assert_eq!(provider.config().build_id, "999");
+        // Untouched field kept its default.
+        assert_eq!(provider.config().api_url, API_URL);
+    }
+
+    #[tokio::test]
+    async fn refresh_config_noop_when_url_empty() {
+        // Default construction (empty REMOTE_CONFIG_URL, no env) must never touch
+        // the network and always reports "unchanged".
+        let provider = AllAnime::new();
+        if provider.config_url.trim().is_empty() {
+            assert!(!provider.refresh_config(true).await);
+            assert_eq!(provider.config().build_id, BUILD_ID);
+        }
+    }
 
     #[test]
     fn find_tobeparsed_nested() {

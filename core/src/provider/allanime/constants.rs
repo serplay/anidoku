@@ -32,6 +32,20 @@
 //! rotated string arrays) and will rotate again; this file is where to re-point
 //! them.
 
+/// URL of the optional remote config JSON that overrides the rotatable
+/// constants below (see [`AllAnimeConfig`](super::config::AllAnimeConfig)). This
+/// is the release-free kill-switch for provider rotations: publish updated
+/// `build_id`/`qd_mask_hex`/hosts here and installed apps self-heal on the next
+/// play attempt.
+///
+/// **Empty by default = disabled** (no network call, pure baked-in behaviour).
+/// Set it to a raw-hosted JSON you control — e.g. a GitHub raw URL like
+/// `https://raw.githubusercontent.com/<you>/AniDoku/main/allanime-config.json`,
+/// or a gist's raw URL. `allanime-config.json` in the repo root is a ready-made
+/// starting point mirroring the current defaults. A per-run override is also
+/// read from the `ANIDOKU_ALLANIME_CONFIG_URL` env var (handy on desktop).
+pub const REMOTE_CONFIG_URL: &str = "";
+
 /// Browser user agent sent with every request (ani-cli `$agent`).
 pub const USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0";
