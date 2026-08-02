@@ -43,6 +43,89 @@ const CTL_RUN: u8 = 0;
 const CTL_PAUSE: u8 = 1;
 const CTL_CANCEL: u8 = 2;
 
+/// How many times a transient network failure is retried before the job fails.
+const MAX_RETRIES: u32 = 4;
+/// First backoff delay; doubles each attempt up to `BACKOFF_CAP`.
+const BACKOFF_BASE: Duration = Duration::from_millis(500);
+/// Upper bound on any single backoff sleep.
+const BACKOFF_CAP: Duration = Duration::from_secs(8);
+
+/// Is `err` a transient network fault a retry might recover from? A flaky CDN
+/// resets mid-body, stalls, or returns a 5xx/429; those are worth retrying. A
+/// 4xx (other than 429), an IO/DB/decrypt error, or a missing source is not.
+fn is_transient(err: &Error) -> bool {
+    match err {
+        Error::Network(e) => {
+            // A reset/incomplete body arrives as is_body()/is_decode(); a dropped
+            // or refused connection as is_connect()/is_request().
+            if e.is_timeout() || e.is_connect() || e.is_request() || e.is_body() || e.is_decode() {
+                return true;
+            }
+            matches!(e.status().map(|s| s.as_u16()), Some(s) if s >= 500 || s == 429)
+        }
+        // The stall / early-end / timeout family we raise ourselves (see
+        // `run_mp4` / `fetch_with_timeout`), plus the retryable HTTP statuses
+        // `run_mp4` folds into its "upstream returned HTTP {status}" message.
+        Error::Download(msg) => {
+            msg.contains("stalled")
+                || msg.contains("connection ended early")
+                || msg.contains("timed out")
+                || msg.contains("upstream returned HTTP 5")
+                || msg.contains("upstream returned HTTP 429")
+        }
+        _ => false,
+    }
+}
+
+/// Un-jittered exponential backoff: `BACKOFF_BASE * 2^attempt`, capped at
+/// `BACKOFF_CAP`. Pure and monotonic non-decreasing (the sequence the tests
+/// assert against).
+fn backoff_delay(attempt: u32) -> Duration {
+    let mult = 1u32.checked_shl(attempt).unwrap_or(u32::MAX);
+    BACKOFF_BASE
+        .checked_mul(mult)
+        .unwrap_or(BACKOFF_CAP)
+        .min(BACKOFF_CAP)
+}
+
+/// Sleep up to `dur`, but return the instant the control flag leaves `CTL_RUN`
+/// (a pause/cancel request) so backoff never delays a cancel — the caller then
+/// re-runs its operation, which observes the flag and returns promptly.
+async fn interruptible_sleep(dur: Duration, flag: &AtomicU8) {
+    let deadline = Instant::now() + dur;
+    loop {
+        let now = Instant::now();
+        if now >= deadline || flag.load(Ordering::SeqCst) != CTL_RUN {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(50).min(deadline - now)).await;
+    }
+}
+
+/// Run `op`, retrying transient network failures with bounded exponential
+/// backoff. Successes (including the pause/cancel outcomes an op returns as
+/// `Ok`), non-transient errors, and exhausted attempts return immediately. The
+/// backoff is cancel/pause-aware via `interruptible_sleep`.
+async fn retry_transient<T, F, Fut>(flag: &AtomicU8, mut op: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut attempt = 0u32;
+    loop {
+        match op().await {
+            Ok(v) => return Ok(v),
+            Err(e) => {
+                if attempt >= MAX_RETRIES || !is_transient(&e) {
+                    return Err(e);
+                }
+                interruptible_sleep(backoff_delay(attempt), flag).await;
+                attempt += 1;
+            }
+        }
+    }
+}
+
 /// Is `from` → `to` a legal state transition?
 ///
 ///   queued      → downloading (claim), paused (user pause before start)
@@ -508,7 +591,9 @@ impl DownloadManager {
     }
 
     /// Ranged MP4 download with byte-offset resume. The file length on disk is
-    /// the source of truth for the checkpoint.
+    /// the source of truth for the checkpoint, so each retry is naturally a
+    /// resume: a transient failure re-reads the offset and re-issues the ranged
+    /// GET, continuing the same file.
     async fn run_mp4(
         &self,
         dir: &Path,
@@ -518,6 +603,40 @@ impl DownloadManager {
         tracker: &mut Tracker<'_>,
     ) -> Result<JobOutcome> {
         let path = dir.join("video.mp4");
+        // Inline (rather than via `retry_transient`) because the attempt borrows
+        // `tracker` mutably, which a reusable `FnMut`-based wrapper can't express.
+        let mut attempt = 0u32;
+        loop {
+            match self.mp4_attempt(&path, source, flag, tracker).await {
+                Ok(out) => return Ok(out),
+                Err(e) => {
+                    if attempt >= MAX_RETRIES || !is_transient(&e) {
+                        return Err(e);
+                    }
+                    interruptible_sleep(backoff_delay(attempt), flag).await;
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
+    /// One MP4 (re)attempt: read the on-disk offset, issue the ranged GET, and
+    /// stream to the file. Returns `Err` (possibly transient) so `run_mp4` can
+    /// retry from the new offset.
+    async fn mp4_attempt(
+        &self,
+        path: &Path,
+        source: &VideoSource,
+        flag: &AtomicU8,
+        tracker: &mut Tracker<'_>,
+    ) -> Result<JobOutcome> {
+        // A cancel/pause requested during backoff short-circuits before we spend
+        // a request on the retry.
+        match flag.load(Ordering::SeqCst) {
+            CTL_PAUSE => return Ok(JobOutcome::Paused),
+            CTL_CANCEL => return Ok(JobOutcome::Canceled),
+            _ => {}
+        }
         let mut offset: i64 = match tokio::fs::metadata(&path).await {
             Ok(m) => m.len() as i64,
             Err(_) => 0,
@@ -662,7 +781,7 @@ impl DownloadManager {
 
         // Keys/init sections are small: always (re)download them.
         for url in &keys {
-            let data = self.fetch_with_timeout(url, referer).await?;
+            let data = self.fetch_with_retry(url, referer, flag).await?;
             tokio::fs::write(dir.join(&map[url]), &data).await?;
         }
 
@@ -681,7 +800,7 @@ impl DownloadManager {
             let fetches = batch.iter().map(|&i| {
                 let url = segments[i].clone();
                 async move {
-                    let data = self.fetch_with_timeout(&url, referer).await?;
+                    let data = self.fetch_with_retry(&url, referer, flag).await?;
                     Ok::<(usize, Vec<u8>), Error>((i, data))
                 }
             });
@@ -701,6 +820,17 @@ impl DownloadManager {
         tracker.set(bytes_done, Some(bytes_done), total, Some(total));
         tracker.persist_now();
         Ok((JobOutcome::Done, quality_label))
+    }
+
+    /// `fetch_with_timeout` with bounded backoff retry on transient failures, so
+    /// one flaky segment/key/init fetch self-heals instead of failing the job.
+    async fn fetch_with_retry(
+        &self,
+        url: &str,
+        referer: Option<&str>,
+        flag: &AtomicU8,
+    ) -> Result<Vec<u8>> {
+        retry_transient(flag, || self.fetch_with_timeout(url, referer)).await
     }
 
     async fn fetch_with_timeout(&self, url: &str, referer: Option<&str>) -> Result<Vec<u8>> {
@@ -962,5 +1092,162 @@ mod tests {
         assert_eq!(read.subtitles.len(), 1);
         assert!(read_manifest(&dir, "show/2").is_none());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn is_transient_classifies_download_errors() {
+        // The stall / early-end / timeout family + retryable HTTP statuses.
+        assert!(is_transient(&Error::Download(
+            "download stalled (timeout)".into()
+        )));
+        assert!(is_transient(&Error::Download(
+            "connection ended early (10/20 bytes) — resume to continue".into()
+        )));
+        assert!(is_transient(&Error::Download(
+            "fetch timed out: https://cdn/seg".into()
+        )));
+        assert!(is_transient(&Error::Download(
+            "upstream returned HTTP 503".into()
+        )));
+        assert!(is_transient(&Error::Download(
+            "upstream returned HTTP 429".into()
+        )));
+        // A 4xx (other than 429) and non-network errors are terminal.
+        assert!(!is_transient(&Error::Download(
+            "upstream returned HTTP 404".into()
+        )));
+        assert!(!is_transient(&Error::Download(
+            "no downloadable source found".into()
+        )));
+        assert!(!is_transient(&Error::Io(std::io::Error::other(
+            "disk full"
+        ))));
+    }
+
+    #[test]
+    fn backoff_delay_is_monotonic_and_capped() {
+        let seq: Vec<Duration> = (0..8).map(backoff_delay).collect();
+        assert_eq!(seq[0], BACKOFF_BASE);
+        // Doubles until the cap, then holds.
+        for w in seq.windows(2) {
+            assert!(w[1] >= w[0], "backoff must be non-decreasing");
+            assert!(w[1] <= BACKOFF_CAP, "backoff must never exceed the cap");
+        }
+        assert_eq!(*seq.last().unwrap(), BACKOFF_CAP);
+    }
+
+    #[tokio::test]
+    async fn retry_transient_drives_attempts_then_succeeds() {
+        let flag = AtomicU8::new(CTL_RUN);
+        let calls = std::cell::Cell::new(0u32);
+        let out: Result<u32> = retry_transient(&flag, || {
+            let n = calls.get() + 1;
+            calls.set(n);
+            async move {
+                if n < 3 {
+                    Err(Error::Download("download stalled (timeout)".into()))
+                } else {
+                    Ok(n)
+                }
+            }
+        })
+        .await;
+        assert_eq!(out.unwrap(), 3);
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[tokio::test]
+    async fn retry_transient_gives_up_on_non_transient() {
+        let flag = AtomicU8::new(CTL_RUN);
+        let calls = std::cell::Cell::new(0u32);
+        let out: Result<u32> = retry_transient(&flag, || {
+            calls.set(calls.get() + 1);
+            async { Err(Error::Download("upstream returned HTTP 404".into())) }
+        })
+        .await;
+        assert!(out.is_err());
+        assert_eq!(calls.get(), 1, "a non-transient error must not retry");
+    }
+
+    /// End-to-end-ish: a localhost server that promises the full length then
+    /// drops mid-body on the first attempt (reqwest sees an incomplete body →
+    /// transient), and honors the `Range` on the retry. Byte-accurate resume
+    /// must reassemble the exact bytes.
+    #[tokio::test]
+    async fn ranged_retry_resumes_after_midbody_reset() {
+        use std::io::{Read, Write};
+
+        let full: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
+        let first_chunk = 400usize;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = full.clone();
+        std::thread::spawn(move || {
+            // Attempt 1: promise the full length, then close mid-body.
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let _ = sock.read(&mut buf);
+                let hdr = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(hdr.as_bytes());
+                let _ = sock.write_all(&body[..first_chunk]);
+                // Drop `sock` here, leaving the promised body incomplete.
+            }
+            // Attempt 2: honor the Range and serve the remainder in full.
+            if let Ok((mut sock, _)) = listener.accept() {
+                let mut buf = [0u8; 2048];
+                let n = sock.read(&mut buf).unwrap_or(0);
+                // reqwest/hyper may emit the header name lower-cased, so match on
+                // the `bytes=` marker rather than a case-sensitive prefix.
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let start = req
+                    .split("bytes=")
+                    .nth(1)
+                    .and_then(|r| r.split(['-', '\r', '\n', ' ']).next())
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .unwrap_or(0);
+                let rest = &body[start..];
+                let resp = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Range: bytes {}-{}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    start,
+                    body.len() - 1,
+                    body.len(),
+                    rest.len()
+                );
+                let _ = sock.write_all(resp.as_bytes());
+                let _ = sock.write_all(rest);
+            }
+        });
+
+        let proxy = ProxyClient::new();
+        let url = format!("http://{addr}/video.mp4");
+        let flag = AtomicU8::new(CTL_RUN);
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+        let out: Result<()> = retry_transient(&flag, || {
+            let proxy = &proxy;
+            let url = &url;
+            let buf = buf.clone();
+            async move {
+                // Re-read the on-disk (here in-memory) offset: each retry resumes.
+                let offset = buf.lock().unwrap().len() as i64;
+                let range = (offset > 0).then(|| format!("bytes={offset}-"));
+                let mut resp = proxy.get_ranged(url, None, range.as_deref()).await?;
+                let status = resp.status().as_u16();
+                if !(200..300).contains(&status) {
+                    return Err(Error::Download(format!("upstream returned HTTP {status}")));
+                }
+                while let Some(chunk) = resp.chunk().await? {
+                    buf.lock().unwrap().extend_from_slice(&chunk);
+                }
+                Ok(())
+            }
+        })
+        .await;
+
+        assert!(out.is_ok(), "retry should recover the download: {out:?}");
+        assert_eq!(*buf.lock().unwrap(), full, "resumed bytes must be exact");
     }
 }
