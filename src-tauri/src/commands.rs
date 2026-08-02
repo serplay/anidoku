@@ -246,9 +246,19 @@ pub async fn anilist_login(app: AppHandle, state: State<'_, AppState>) -> CmdRes
         .client_id()
         .ok_or_else(|| "Set your AniList client ID in Settings first.".to_string())?;
 
+    // Supersede any prior in-flight capture: a re-tapped Sign in (common when
+    // the iOS webview hop flakes) must abort the previous attempt so it releases
+    // the fixed loopback port before this one binds it. Without this the second
+    // login fails with "cannot bind loopback port" while the first still listens.
+    if let Some(prev) = state.oauth_abort.lock().unwrap().take() {
+        prev.abort();
+    }
+
     // Start the loopback capture before opening the browser so the port is
-    // bound and listening by the time AniList redirects back.
-    let capture = tauri::async_runtime::spawn(auth::run_loopback_capture(Duration::from_secs(300)));
+    // bound and listening by the time AniList redirects back. Spawn on tokio
+    // directly so we can hold an abort handle for the single-flight guard.
+    let capture = tokio::spawn(auth::run_loopback_capture(Duration::from_secs(300)));
+    *state.oauth_abort.lock().unwrap() = Some(capture.abort_handle());
 
     let url = auth::authorize_url(&client_id);
 

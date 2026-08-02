@@ -41,6 +41,10 @@ pub struct AppState {
     pub downloads: Arc<DownloadManager>,
     /// Root of the downloads tree (app-data `downloads/`).
     pub downloads_root: PathBuf,
+    /// Abort handle for the in-flight OAuth loopback capture, if any. A new
+    /// login supersedes a prior one (common on iOS when the webview hop flakes
+    /// and the user re-taps Sign in) so the two don't fight over the fixed port.
+    pub oauth_abort: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 /// Platform data root. On Android `dirs::data_dir()` is `None` and the
@@ -106,6 +110,7 @@ impl AppState {
             auth,
             downloads,
             downloads_root,
+            oauth_abort: std::sync::Mutex::new(None),
         }
     }
 }

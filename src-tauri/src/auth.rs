@@ -155,6 +155,46 @@ pub fn authorize_url(client_id: &str) -> String {
     )
 }
 
+/// Bind the fixed loopback OAuth port with `SO_REUSEADDR`.
+///
+/// The port is fixed (AniList requires an exact redirect URL), so back-to-back
+/// login attempts are prone to `EADDRINUSE`: each capture opens real
+/// connections on the port, and the connections that a *completed* attempt
+/// leaves in `TIME_WAIT` make the plain `TcpListener::bind` reject a fresh bind
+/// for a minute or so. `SO_REUSEADDR` lets us rebind past those lingering
+/// connections. (This is the intermittent "cannot bind loopback port" the iOS
+/// login hits when the user re-taps Sign in.)
+fn bind_loopback_reuse() -> std::io::Result<tokio::net::TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let addr: std::net::SocketAddr = (std::net::Ipv4Addr::LOCALHOST, OAUTH_PORT).into();
+    let sock = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+    sock.set_reuse_address(true)?;
+    sock.set_nonblocking(true)?;
+    sock.bind(&addr.into())?;
+    sock.listen(128)?;
+    tokio::net::TcpListener::from_std(sock.into())
+}
+
+/// Bind with a few retries. `SO_REUSEADDR` clears the `TIME_WAIT` case, but a
+/// *superseded* prior capture task (see the single-flight abort in the login
+/// command) releases its still-live listener asynchronously when it is dropped,
+/// so the first rebind can still race it. A short bounded retry bridges that
+/// hand-off gap; the loopback bind either succeeds within a few hundred ms or
+/// something else genuinely owns the port.
+async fn bind_loopback_retrying() -> Result<tokio::net::TcpListener, String> {
+    let mut last = String::new();
+    for attempt in 0..6u32 {
+        match bind_loopback_reuse() {
+            Ok(listener) => return Ok(listener),
+            Err(e) => {
+                last = e.to_string();
+                tokio::time::sleep(Duration::from_millis(150 * (attempt as u64 + 1))).await;
+            }
+        }
+    }
+    Err(format!("cannot bind loopback port {OAUTH_PORT}: {last}"))
+}
+
 /// Result of a completed OAuth capture.
 pub struct Captured {
     pub access_token: String,
@@ -166,11 +206,8 @@ pub struct Captured {
 /// back, bridge the fragment through JS, and capture the token. Times out.
 pub async fn run_loopback_capture(timeout: Duration) -> Result<Captured, String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::net::TcpListener;
 
-    let listener = TcpListener::bind(("127.0.0.1", OAUTH_PORT))
-        .await
-        .map_err(|e| format!("cannot bind loopback port {OAUTH_PORT}: {e}"))?;
+    let listener = bind_loopback_retrying().await?;
 
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
