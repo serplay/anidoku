@@ -28,9 +28,21 @@
 //!
 //! `BUILD_ID`, `QD_MASK_HEX`, `EPISODE_LANE`, `KEY_GROUP`, `REFERER`, and the
 //! hosts are all baked into the web client (the crypto `chunks/*.js`; the mask
-//! is `Fh(buildId)` over the embedded `ad` array — decode by resolving the
-//! rotated string arrays) and will rotate again; this file is where to re-point
-//! them.
+//! is `Fh(buildId)`/`ev(buildId)` over the embedded `ad` array — decode by
+//! resolving the rotated string arrays) and will rotate again; this file is
+//! where to re-point them.
+//!
+//! **2026-08-02 rotation (buildId 75 -> 81 + APQ hash rotation).** Bootstrap
+//! started 404ing `{"error":"unknown_build_id"}` for buildId 75; the new build
+//! is `81` with a fresh `QD_MASK_HEX`. This rotation *also* rotated the
+//! persisted-query hash (the old `d405d0…` began returning
+//! `PersistedQueryNotFound`). Rather than chase that hash, we now **define the
+//! `episode` query ourselves ([`EPISODE_SOURCES_GQL`]) and POST it with a
+//! self-computed `sha256(query)` hash** (standard Apollo APQ client
+//! registration) — the aaReq binds `qh` to that same hash, so query/hash/aaReq
+//! always agree and a future persisted-hash rotation no longer breaks us. Only
+//! buildId/mask/hosts still need tracking. (`show{ _id }` in the query is
+//! required — `sourceUrls` alone trips a server resolver bug.)
 
 /// URL of the optional remote config JSON that overrides the rotatable
 /// constants below (see [`AllAnimeConfig`](super::config::AllAnimeConfig)). This
@@ -67,9 +79,10 @@ pub const MP4UPLOAD_REFERER: &str = "https://www.mp4upload.com/";
 pub const API_URL: &str = "https://api.mkissa.net/api";
 
 /// Client build id, sent as the `x-build-id` header and used inside the aaReq /
-/// x-aa-boot tokens and the bootstrap request. Baked into the web client (`wf`
-/// in the crypto bundle: `(Rn(..)+mr(..)) !== "string" ? "75" : ""`).
-pub const BUILD_ID: &str = "75";
+/// x-aa-boot tokens and the bootstrap request. Baked into the web client (the
+/// crypto bundle: `Cf = (Ur(..)+Ur(..)) !== "string" ? "81" : ""`). Rotates
+/// often — 63 (mid-Jul), 75 (2026-07-30), 81 (2026-08-02).
+pub const BUILD_ID: &str = "81";
 
 /// Per-epoch key bootstrap endpoint (base; the `?buildId=&k=<lane>` query is
 /// built at call time). Returns `{"epoch":<int>,"partB":<b64>,"switchAt":..}`;
@@ -103,13 +116,25 @@ pub const AA_BOOT_PREFIX: &str = "aa-boot:";
 pub const EPOCH_BUCKET_MS: u128 = 259_200_000;
 
 /// Static mask XORed with the bootstrap `partB` to derive the AES-256 key, and
-/// HMAC-keyed for `x-aa-boot`. The web client computes it as `Fh(buildId)` over
-/// an embedded `ad` byte-array, so it rotates with `BUILD_ID`.
-pub const QD_MASK_HEX: &str = "ff65f1ba05d2556424dfec9f38f816e0a7d284a951845c865a609cb83bee7690";
+/// HMAC-keyed for `x-aa-boot`. The web client computes it as `ev(buildId)` (was
+/// `Fh`) over an embedded `ad` byte-array, so it rotates with `BUILD_ID`.
+pub const QD_MASK_HEX: &str = "1c51425b45d71a76c58adb6b52fe3e766d615bb48a252327b7c74323ea37658b";
 
-/// Persisted-query hash for the episode embed query (ani-cli `$query_hash`).
-pub const EPISODE_QUERY_HASH: &str =
-    "d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec";
+/// The `episode(...)` sources GraphQL query we send.
+///
+/// **We define this ourselves and compute its persisted-query hash at runtime**
+/// (`sha256(query)`) rather than baking in a server-side hash — a deliberate
+/// resilience choice. allanime rotates its persisted-query hashes along with the
+/// build (buildId 81 started rejecting the old `d405d0…` hash with
+/// `PersistedQueryNotFound`). Standard Apollo APQ lets a client register its own
+/// query by POSTing the full text with a matching `sha256Hash`; the aaReq token
+/// binds `qh` to that same self-computed hash, so query and hash can never drift
+/// and a future hash rotation no longer breaks us.
+///
+/// The `show{ _id }` selection is load-bearing: requesting `sourceUrls` alone
+/// trips a server resolver bug (`Cannot set properties of undefined (setting
+/// 'countryOfOrigin')`). Keep a `show` sub-selection.
+pub const EPISODE_SOURCES_GQL: &str = "query($showId:String!,$translationType:VaildTranslationTypeEnumType!,$episodeString:String!){episode(showId:$showId translationType:$translationType episodeString:$episodeString){sourceUrls show{_id}}}";
 
 /// Search query. ani-cli only requests `_id name availableEpisodes`; we also
 /// ask for `englishName` and `thumbnail` for the results grid (both are

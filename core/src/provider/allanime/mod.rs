@@ -230,29 +230,41 @@ impl AllAnime {
     async fn get_episode_persisted(
         &self,
         cfg: &AllAnimeConfig,
+        query_hash: &str,
         show_id: &str,
         episode: &str,
         mode: TranslationType,
         aa_req: &str,
     ) -> Result<String> {
-        let variables = format!(
-            r#"{{"showId":"{show_id}","translationType":"{}","episodeString":"{episode}"}}"#,
-            mode.as_str()
-        );
-        let extensions = format!(
-            r#"{{"persistedQuery":{{"version":1,"sha256Hash":"{}"}},"k":"{}","aaReq":"{aa_req}"}}"#,
-            cfg.episode_query_hash, cfg.episode_lane
-        );
+        // POST the full query text with a persisted-query hash we compute from
+        // that same text (Apollo APQ client registration). Unlike a bare GET the
+        // server always accepts this — it never depends on the hash being
+        // pre-registered server-side, which is what breaks when allanime rotates
+        // its persisted-query hashes (`PersistedQueryNotFound`). The aaReq token
+        // binds `qh` to this hash, so all three (query, hash, aaReq) agree.
+        let variables = json!({
+            "showId": show_id,
+            "translationType": mode.as_str(),
+            "episodeString": episode,
+        });
+        let extensions = json!({
+            "persistedQuery": { "version": 1, "sha256Hash": query_hash },
+            "k": cfg.episode_lane,
+            "aaReq": aa_req,
+        });
+        let body = json!({
+            "query": cfg.episode_query,
+            "variables": variables,
+            "extensions": extensions,
+        });
         let resp = self
             .client
-            .get(&cfg.api_url)
+            .post(&cfg.api_url)
             .header("Referer", &cfg.referer)
             .header("Origin", &cfg.referer)
             .header("x-build-id", &cfg.build_id)
-            .query(&[
-                ("variables", variables.as_str()),
-                ("extensions", &extensions),
-            ])
+            .header("Content-Type", "application/json")
+            .json(&body)
             .send()
             .await?
             .error_for_status()?;
@@ -432,17 +444,20 @@ impl AllAnime {
             .as_millis();
         let boot = self.fetch_bootstrap(cfg, &cfg.episode_lane, now_ms).await?;
         let key = decrypt::derive_key_xor(&boot.part_b, &cfg.qd_mask_hex)?;
+        // Persisted-query hash is computed from our own query text (APQ), so it
+        // always matches what we POST and what the aaReq attests to.
+        let query_hash = decrypt::sha256_hex(&cfg.episode_query);
         let aa_req = decrypt::sign_aa_req(
             &key,
             boot.epoch,
             &cfg.build_id,
-            &cfg.episode_query_hash,
+            &query_hash,
             &cfg.episode_lane,
             now_ms,
         )?;
 
         let body = self
-            .get_episode_persisted(cfg, show_id, episode, mode, &aa_req)
+            .get_episode_persisted(cfg, &query_hash, show_id, episode, mode, &aa_req)
             .await?;
         let refs = self
             .unwrap_sources_response(&body, &key)

@@ -65,6 +65,12 @@ pub fn derive_key_xor(part_b_b64: &str, mask_hex: &str) -> Result<[u8; 32]> {
     Ok(key)
 }
 
+/// Hex-encoded SHA-256 of `data`. Used to compute the persisted-query hash from
+/// our own query text (Apollo APQ) so query and hash can never drift.
+pub fn sha256_hex(data: &str) -> String {
+    hex::encode(Sha256::digest(data.as_bytes()))
+}
+
 /// HMAC-SHA256 (`bg` in the web client's crypto bundle). Hand-rolled to avoid a
 /// new dependency; standard construction over SHA-256's 64-byte block.
 fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {

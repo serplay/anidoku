@@ -48,8 +48,11 @@ pub struct AllAnimeConfig {
     pub episode_lane: String,
     /// AES-256 key mask (XORed with bootstrap `partB`; HMAC-keyed for x-aa-boot).
     pub qd_mask_hex: String,
-    /// Persisted-query hash for the episode-sources query.
-    pub episode_query_hash: String,
+    /// The `episode(...)` sources query text. Its persisted-query hash is
+    /// computed at runtime as `sha256(episode_query)` (see [`EPISODE_SOURCES_GQL`]),
+    /// so query and hash never drift and a server-side hash rotation can't break
+    /// us — we register our own via APQ.
+    pub episode_query: String,
     /// Bucket (ms) the `x-aa-boot` epoch is floored to.
     pub epoch_bucket_ms: u128,
 }
@@ -66,7 +69,7 @@ impl Default for AllAnimeConfig {
             key_group: KEY_GROUP.to_string(),
             episode_lane: EPISODE_LANE.to_string(),
             qd_mask_hex: QD_MASK_HEX.to_string(),
-            episode_query_hash: EPISODE_QUERY_HASH.to_string(),
+            episode_query: EPISODE_SOURCES_GQL.to_string(),
             epoch_bucket_ms: EPOCH_BUCKET_MS,
         }
     }
@@ -90,7 +93,7 @@ impl AllAnimeConfig {
             || self.api_url.is_empty()
             || self.bootstrap_url.is_empty()
             || self.episode_lane.is_empty()
-            || self.episode_query_hash.is_empty()
+            || self.episode_query.is_empty()
         {
             return Err("allanime config has an empty required field".into());
         }
