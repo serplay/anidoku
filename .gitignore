@@ -39,3 +39,9 @@ src-tauri/target
 **/build/
 hs_err_pid*.log   # JVM crash dumps
 *.hprof           # JVM heap dumps
+
+# Playwright
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
