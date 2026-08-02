@@ -34,6 +34,10 @@
 	let subtitles = $state<{ label: string; lang: string; src: string }[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
+	// Distinct from `error`: the provider answered fine, this episode just has no
+	// playable hosts (some shows are searchable but source-less). Rendered as a
+	// calm empty-state, not a failure.
+	let noSources = $state(false);
 	// Completed download for this episode, when playing offline.
 	let offline = $state<OfflineInfo | null>(null);
 	// User opted out of the offline copy for this episode ("Stream instead").
@@ -76,6 +80,7 @@
 	async function load(showId: string, episode: string, isDub: boolean) {
 		loading = true;
 		error = null;
+		noSources = false;
 		selected = null;
 		// Ensure the AniList mapping exists before auto-progress needs it —
 		// the detail page resolves it too, but a deep link / restart may not
@@ -132,7 +137,7 @@
 			resumeTo = ws?.position_secs ?? 0;
 			attempted = new Set();
 			if (srcs.length === 0) {
-				error = 'No playable sources found for this episode.';
+				noSources = true;
 			} else {
 				selectSource(srcs[0]);
 			}
@@ -376,6 +381,24 @@
 		<Skeleton width="90px" height="34px" />
 		<Skeleton width="120px" height="34px" />
 	</div>
+{:else if noSources && !selected}
+	<div class="empty-state">
+		<svg viewBox="0 0 24 24" aria-hidden="true">
+			<path
+				d="M4 5h16v11H4z M8 20h8 M12 16v4 M3 3l18 18"
+				stroke="currentColor"
+				stroke-width="1.8"
+				fill="none"
+				stroke-linecap="round"
+				stroke-linejoin="round"
+			/>
+		</svg>
+		<p class="empty-title">No sources available</p>
+		<p class="empty-sub">
+			This episode can be found but has no playable video hosts right now. Try another episode,
+			switch sub/dub, or check back later.
+		</p>
+	</div>
 {:else if error && !selected}
 	<p class="error">{error}</p>
 {:else}
@@ -618,5 +641,32 @@
 	.error {
 		color: var(--color-down);
 		margin-top: var(--space-md);
+	}
+	.empty-state {
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		justify-content: center;
+		text-align: center;
+		gap: var(--space-sm);
+		padding: var(--space-xxl) var(--space-lg);
+		background: var(--color-surface-card);
+		border: 1px solid var(--color-hairline);
+		border-radius: var(--radius-xl);
+		aspect-ratio: 16 / 9;
+	}
+	.empty-state svg {
+		width: 48px;
+		height: 48px;
+		color: var(--color-muted);
+		opacity: 0.7;
+	}
+	.empty-title {
+		font: var(--text-title-md);
+	}
+	.empty-sub {
+		color: var(--color-muted);
+		font: var(--text-body-md);
+		max-width: 42ch;
 	}
 </style>

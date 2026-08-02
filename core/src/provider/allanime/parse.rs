@@ -95,16 +95,57 @@ pub struct SourceRef {
 }
 
 /// Extract `{ sourceName, sourceUrl }` pairs from the decrypted sources JSON.
+///
+/// Distinguishes two failure shapes that used to collapse into one error:
+///  - **Legitimately source-less episode** — the `episode` object is present but
+///    its `sourceUrls` is null/absent/`[]`. Some shows can be searched and have
+///    episodes listed but simply have no playable hosts. This returns
+///    `Ok(vec![])` so the UI shows a clean "no sources" state instead of a scary
+///    error, and the caller does not treat it as provider breakage.
+///  - **Query/crypto failure** — the response carries a GraphQL `errors` array
+///    (e.g. `AA_CRYPTO_STALE`, `PersistedQueryNotFound`) or no `episode` object
+///    at all. This returns `Err` so the caller's self-heal (config refresh +
+///    retry) fires and the user sees a real problem, never silent emptiness.
 pub fn parse_source_refs(decrypted_json: &str) -> Result<Vec<SourceRef>> {
     let v: Value = serde_json::from_str(decrypted_json)
         .map_err(|e| Error::Provider(format!("sources: invalid json: {e}")))?;
+
+    // A GraphQL/crypto-level rejection comes back as `{"errors":[{message,..}]}`
+    // (often with no `data`). Surface it so self-heal fires — do not mistake it
+    // for a source-less episode.
+    if let Some(errs) = v.get("errors").and_then(Value::as_array) {
+        if !errs.is_empty() {
+            let msg = errs
+                .iter()
+                .filter_map(|e| e.get("message").and_then(Value::as_str))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let msg = if msg.is_empty() {
+                "unspecified api error".to_string()
+            } else {
+                msg
+            };
+            return Err(Error::Provider(format!("sources: api error: {msg}")));
+        }
+    }
+
     // The persisted-query payload decrypts to `{"episode":{"sourceUrls":..}}`;
-    // the POST fallback nests it under `data`. Accept either shape.
-    let arr = v
-        .pointer("/data/episode/sourceUrls")
-        .or_else(|| v.pointer("/episode/sourceUrls"))
-        .and_then(Value::as_array)
-        .ok_or_else(|| Error::Provider("sources: missing episode.sourceUrls".into()))?;
+    // the POST fallback nests it under `data`. Accept either shape. A missing /
+    // null `episode` means the query itself did not resolve (breakage), not an
+    // empty episode — error so self-heal fires.
+    let Some(episode) = v
+        .pointer("/data/episode")
+        .or_else(|| v.pointer("/episode"))
+        .filter(|e| !e.is_null())
+    else {
+        return Err(Error::Provider("sources: missing episode in response".into()));
+    };
+
+    // Episode present but no `sourceUrls` array (null / absent / empty) => this
+    // episode legitimately has no playable sources.
+    let Some(arr) = episode.get("sourceUrls").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
 
     let mut out = Vec::new();
     for s in arr {
@@ -243,6 +284,35 @@ mod tests {
         assert_eq!(refs[0].name, "Default");
         assert_eq!(refs[0].url, "--1748abcd");
         assert_eq!(refs[1].name, "Yt");
+    }
+
+    #[test]
+    fn parse_source_refs_sourceless_episode_is_empty_not_error() {
+        // Episode present but no playable hosts: null, absent, and [] all mean
+        // "no sources" — Ok(empty), so the UI shows a clean message rather than
+        // erroring on play.
+        for body in [
+            r#"{"data":{"episode":{"episodeString":"1","sourceUrls":null}}}"#,
+            r#"{"data":{"episode":{"episodeString":"1"}}}"#,
+            r#"{"data":{"episode":{"episodeString":"1","sourceUrls":[]}}}"#,
+            r#"{"episode":{"sourceUrls":null}}"#,
+        ] {
+            let refs = parse_source_refs(body).expect("source-less episode must not error");
+            assert!(refs.is_empty(), "expected empty for {body}");
+        }
+    }
+
+    #[test]
+    fn parse_source_refs_api_error_and_missing_episode_still_error() {
+        // A crypto/GraphQL rejection or a missing episode object is real
+        // breakage — must Err so self-heal (config refresh + retry) fires.
+        let stale = r#"{"errors":[{"message":"AA_CRYPTO_STALE"}]}"#;
+        let err = parse_source_refs(stale).unwrap_err().to_string();
+        assert!(err.contains("AA_CRYPTO_STALE"), "got: {err}");
+
+        assert!(parse_source_refs(r#"{"data":{"episode":null}}"#).is_err());
+        assert!(parse_source_refs(r#"{"data":{}}"#).is_err());
+        assert!(parse_source_refs(r#"{"randomshape":1}"#).is_err());
     }
 
     #[test]
