@@ -138,7 +138,9 @@ pub fn parse_source_refs(decrypted_json: &str) -> Result<Vec<SourceRef>> {
         .or_else(|| v.pointer("/episode"))
         .filter(|e| !e.is_null())
     else {
-        return Err(Error::Provider("sources: missing episode in response".into()));
+        return Err(Error::Provider(
+            "sources: missing episode in response".into(),
+        ));
     };
 
     // Episode present but no `sourceUrls` array (null / absent / empty) => this

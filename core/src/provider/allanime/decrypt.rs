@@ -103,8 +103,10 @@ pub fn sign_aa_boot(
     lane: &str,
 ) -> Result<String> {
     let mask = hex::decode(mask_hex).map_err(|e| Error::Decrypt(format!("bad mask hex: {e}")))?;
-    let inner_key =
-        hmac_sha256(&mask, format!("{}{build_id}", super::AA_BOOT_PREFIX).as_bytes());
+    let inner_key = hmac_sha256(
+        &mask,
+        format!("{}{build_id}", super::AA_BOOT_PREFIX).as_bytes(),
+    );
     let sig = format!("{build_id}:{key_group}:{referer_host}:{epoch}:{lane}");
     let mac = hmac_sha256(&inner_key, sig.as_bytes());
     Ok(hex::encode(mac))
