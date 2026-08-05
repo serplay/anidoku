@@ -80,9 +80,9 @@ pub const API_URL: &str = "https://api.mkissa.net/api";
 
 /// Client build id, sent as the `x-build-id` header and used inside the aaReq /
 /// x-aa-boot tokens and the bootstrap request. Baked into the web client (the
-/// crypto bundle: `Cf = (Ur(..)+Ur(..)) !== "string" ? "81" : ""`). Rotates
-/// often — 63 (mid-Jul), 75 (2026-07-30), 81 (2026-08-02).
-pub const BUILD_ID: &str = "81";
+/// crypto bundle: `qf = (ta(..)+ta(..)) !== "string" ? "86" : ""`). Rotates
+/// often — 63 (mid-Jul), 75 (2026-07-30), 81 (2026-08-02), 86 (2026-08-05).
+pub const BUILD_ID: &str = "86";
 
 /// Per-epoch key bootstrap endpoint (base; the `?buildId=&k=<lane>` query is
 /// built at call time). Returns `{"epoch":<int>,"partB":<b64>,"switchAt":..}`;
@@ -111,14 +111,16 @@ pub const REFERER_HOST: &str = "mkissa.to";
 /// (`bg(mask, "aa-boot:" + buildId)` in the web client's `PS`).
 pub const AA_BOOT_PREFIX: &str = "aa-boot:";
 
-/// Bucket (ms) the `x-aa-boot` epoch is floored to (web client `qh = 2592e5`,
-/// i.e. 3 days). `epoch = floor(now_ms / EPOCH_BUCKET_MS)`.
-pub const EPOCH_BUCKET_MS: u128 = 259_200_000;
+/// Bucket (ms) the `x-aa-boot` epoch is floored to (web client `Rv`).
+/// `epoch = floor(now_ms / EPOCH_BUCKET_MS)`. Rotated 3 days -> 7 days on
+/// 2026-08-05 (`6048e5`) — a stale bucket makes every epoch wrong and the
+/// bootstrap 403s `invalid_boot_token`, so re-check this on every rotation.
+pub const EPOCH_BUCKET_MS: u128 = 604_800_000;
 
 /// Static mask XORed with the bootstrap `partB` to derive the AES-256 key, and
 /// HMAC-keyed for `x-aa-boot`. The web client computes it as `ev(buildId)` (was
 /// `Fh`) over an embedded `ad` byte-array, so it rotates with `BUILD_ID`.
-pub const QD_MASK_HEX: &str = "1c51425b45d71a76c58adb6b52fe3e766d615bb48a252327b7c74323ea37658b";
+pub const QD_MASK_HEX: &str = "4d3a54eaa825c7ae97c44ebd9c0a3d433555f976ec7df09b0450e26f843a8d25";
 
 /// The `episode(...)` sources GraphQL query we send.
 ///
