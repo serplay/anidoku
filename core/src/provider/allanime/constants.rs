@@ -43,6 +43,18 @@
 //! always agree and a future persisted-hash rotation no longer breaks us. Only
 //! buildId/mask/hosts still need tracking. (`show{ _id }` in the query is
 //! required — `sourceUrls` alone trips a server resolver bug.)
+//!
+//! **2026-08-07 rotation (buildId 86 -> 92).** Bootstrap 404'd
+//! `unknown_build_id` for 86; new build `92` with a fresh [`QD_MASK_HEX`].
+//! Everything else held: 7-day epoch bucket (`Rv = 6048e5`), lane `k7`,
+//! keyGroup `mkissa`, self-registered APQ query. Crypto chunk this time was
+//! `chunks/Cc2uAK5C.js` (buildId `Zf`, mask fn `Dv` over the fragment array
+//! `Rd`, x-aa-boot signer `a2`, HMAC `cp`, epoch fns `Bv`/`d2`); reachable by
+//! crawling `mkissa.to` -> `entry/app.*.js` -> chunks and grepping for
+//! `client-crypto`. Fastest derivation is still to slice the chunk's string
+//! array + `Cr`/`ur`/`pa`/`Zf`/`Rd`/`t2`/`r2`/`Un`/`Dv` into Node and call
+//! `Dv()` — note the bundle overrides `console`, so print via
+//! `process.stdout.write`.
 
 /// URL of the optional remote config JSON that overrides the rotatable
 /// constants below (see [`AllAnimeConfig`](super::config::AllAnimeConfig)). This
@@ -80,9 +92,10 @@ pub const API_URL: &str = "https://api.mkissa.net/api";
 
 /// Client build id, sent as the `x-build-id` header and used inside the aaReq /
 /// x-aa-boot tokens and the bootstrap request. Baked into the web client (the
-/// crypto bundle: `qf = (ta(..)+ta(..)) !== "string" ? "86" : ""`). Rotates
-/// often — 63 (mid-Jul), 75 (2026-07-30), 81 (2026-08-02), 86 (2026-08-05).
-pub const BUILD_ID: &str = "86";
+/// crypto bundle: `Zf = (ur(..)+ur(..)) !== "string" ? "92" : ""`). Rotates
+/// often — 63 (mid-Jul), 75 (2026-07-30), 81 (2026-08-02), 86 (2026-08-05),
+/// 92 (2026-08-07).
+pub const BUILD_ID: &str = "92";
 
 /// Per-epoch key bootstrap endpoint (base; the `?buildId=&k=<lane>` query is
 /// built at call time). Returns `{"epoch":<int>,"partB":<b64>,"switchAt":..}`;
@@ -118,9 +131,10 @@ pub const AA_BOOT_PREFIX: &str = "aa-boot:";
 pub const EPOCH_BUCKET_MS: u128 = 604_800_000;
 
 /// Static mask XORed with the bootstrap `partB` to derive the AES-256 key, and
-/// HMAC-keyed for `x-aa-boot`. The web client computes it as `ev(buildId)` (was
-/// `Fh`) over an embedded `ad` byte-array, so it rotates with `BUILD_ID`.
-pub const QD_MASK_HEX: &str = "4d3a54eaa825c7ae97c44ebd9c0a3d433555f976ec7df09b0450e26f843a8d25";
+/// HMAC-keyed for `x-aa-boot`. The web client computes it as `Dv(buildId)` (was
+/// `ev`/`Fh`) over an embedded base64-fragment array (`Rd`), so it rotates with
+/// `BUILD_ID`.
+pub const QD_MASK_HEX: &str = "ba5581412657112c65c9a0635168529fa2c5f477e2aa37ead0f8e9058e5ecc5f";
 
 /// The `episode(...)` sources GraphQL query we send.
 ///

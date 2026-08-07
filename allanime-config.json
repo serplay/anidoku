@@ -1,6 +1,6 @@
 {
   "_comment": "Remote override for the allanime provider's volatile constants. Host this file somewhere raw (GitHub raw, a gist, any static URL) and point core/src/provider/allanime/constants.rs REMOTE_CONFIG_URL (or the ANIDOKU_ALLANIME_CONFIG_URL env var) at it. When allanime rotates its crypto, publish a new version here — installed apps self-heal on the next play attempt, no release required. Every field is optional and falls back to the baked-in default, so a rotation typically only needs build_id + qd_mask_hex. Underscore-prefixed keys are ignored.",
-  "build_id": "86",
+  "build_id": "92",
   "api_url": "https://api.mkissa.net/api",
   "bootstrap_url": "https://api.mkissa.net/client-crypto/v1/bootstrap",
   "referer": "https://mkissa.to",
@@ -8,7 +8,7 @@
   "base_host": "allanime.day",
   "key_group": "mkissa",
   "episode_lane": "k7",
-  "qd_mask_hex": "4d3a54eaa825c7ae97c44ebd9c0a3d433555f976ec7df09b0450e26f843a8d25",
+  "qd_mask_hex": "ba5581412657112c65c9a0635168529fa2c5f477e2aa37ead0f8e9058e5ecc5f",
   "episode_query": "query($showId:String!,$translationType:VaildTranslationTypeEnumType!,$episodeString:String!){episode(showId:$showId translationType:$translationType episodeString:$episodeString){sourceUrls show{_id}}}",
   "epoch_bucket_ms": 604800000
 }
