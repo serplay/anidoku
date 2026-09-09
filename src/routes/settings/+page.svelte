@@ -8,6 +8,7 @@
 		anilistSyncNow,
 		getNotifyPlanning,
 		setNotifyPlanning,
+		refreshProviderConfig,
 		isDesktop,
 		type Settings
 	} from '$lib/api';
@@ -21,6 +22,24 @@
 	let error = $state<string | null>(null);
 	let notifyPlanning = $state(false);
 	let notifySaving = $state(false);
+	let providerChecking = $state(false);
+
+	async function checkProvider() {
+		providerChecking = true;
+		try {
+			const r = await refreshProviderConfig();
+			settings = await getSettings();
+			pushToast(
+				r.changed
+					? `Provider config updated (build ${r.build_id}).`
+					: `Provider config is current (build ${r.build_id}).`
+			);
+		} catch (e) {
+			pushToast(e instanceof Error ? e.message : String(e));
+		} finally {
+			providerChecking = false;
+		}
+	}
 
 	$effect(() => {
 		void init();
@@ -177,6 +196,23 @@
 	{#if error}
 		<p class="error">{error}</p>
 	{/if}
+</section>
+
+<section class="card provider" data-testid="provider-card">
+	<h2>Streaming provider</h2>
+	<p class="hint">
+		The video provider rotates its access scheme every few weeks. A fix is published automatically
+		and picked up on the next play attempt; use this to fetch it right away.
+	</p>
+	<div class="provider-row">
+		<span>
+			Build <strong data-testid="provider-build">{settings?.provider_build_id ?? '—'}</strong>
+			· config <strong data-testid="provider-source">{settings?.provider_config_source ?? '—'}</strong>
+		</span>
+		<Button variant="secondary" onclick={checkProvider} disabled={providerChecking}>
+			{providerChecking ? 'Checking…' : 'Check for provider update'}
+		</Button>
+	</div>
 </section>
 
 <section class="card notifications">
@@ -349,5 +385,12 @@
 		.redirect {
 			word-break: break-all;
 		}
+	}
+	.provider-row {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--space-md);
+		flex-wrap: wrap;
 	}
 </style>

@@ -38,6 +38,20 @@ pub struct AllAnime {
     config_url: String,
     /// Last time a remote refresh actually hit the network (for throttling).
     last_refresh: RwLock<Option<Instant>>,
+    /// Whether the live config came from the remote override (vs. baked-in).
+    remote_applied: RwLock<bool>,
+}
+
+/// Snapshot of where the provider's volatile config currently comes from —
+/// surfaced in the app's Settings so a user (or a bug report) can tell whether
+/// the self-heal has kicked in.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProviderStatus {
+    pub build_id: String,
+    /// `"remote"` once a remote override has been applied, else `"baked"`.
+    pub config_source: &'static str,
+    /// The remote config URL in effect (empty = self-heal disabled).
+    pub config_url: String,
 }
 
 impl Default for AllAnime {
@@ -125,6 +139,7 @@ impl AllAnime {
             config: RwLock::new(AllAnimeConfig::default()),
             config_url,
             last_refresh: RwLock::new(None),
+            remote_applied: RwLock::new(false),
         }
     }
 
@@ -203,7 +218,20 @@ impl AllAnime {
             );
             *c = parsed;
         }
+        if let Ok(mut r) = self.remote_applied.write() {
+            *r = true;
+        }
         true
+    }
+
+    /// See [`ProviderStatus`].
+    pub fn status(&self) -> ProviderStatus {
+        let remote = self.remote_applied.read().map(|r| *r).unwrap_or(false);
+        ProviderStatus {
+            build_id: self.config().build_id,
+            config_source: if remote { "remote" } else { "baked" },
+            config_url: self.config_url.clone(),
+        }
     }
 
     /// Fetch the current `{ epoch, partB }` used to sign the aaReq token and
