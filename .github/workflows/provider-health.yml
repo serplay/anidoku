@@ -1,28 +1,55 @@
 name: Provider health
 
-# Early-warning system for allanime rotations. The provider actively rotates its
-# anti-scraping crypto (build id, key mask, lane/x-aa-boot scheme, hosts), and
-# each rotation is a total streaming outage until re-ported. This runs the live
-# end-to-end sources test on a schedule so a break is caught here — and, if a
-# remote config is configured, its self-heal is validated too — rather than by a
-# user reporting "streaming stopped working". On failure it opens (or bumps) a
-# tracking issue.
+# Early-warning *and self-healing* pipeline for allanime rotations.
+#
+# allanime rotates its anti-scraping crypto every few weeks and each rotation is
+# a total streaming outage until re-ported. Before 2026-09 this workflow only
+# spammed an issue every 6h; issue #3 collected 100+ "still failing" comments
+# over a month while the fix PR (#4) sat unmerged and installed apps had no
+# remote config to self-heal from. Now:
+#
+#   live       run the live sources test with the baked-in config AND with the
+#              published remote config; classify a failure (rotation /
+#              transient / remote-config / unknown); retry transients once.
+#   auto-port  on a rotation: run the Playwright oracle (scripts/allanime-oracle)
+#              against the real web client, apply the derived values, re-run
+#              the core gates + live test, open a PR and auto-merge it. Merging
+#              publishes allanime-config.json on master, which is what shipped
+#              apps fetch — so the fix reaches users without a release.
+#   report     one issue per outage with a status block updated in place
+#              (no per-run comments), comments only on state change, auto-close
+#              on recovery, and a nudge for stale provider-health PRs.
+#
+# Drill: dispatch with simulate_rotation=true to exercise the whole path with a
+# bogus build_id without waiting for allanime to rotate.
 
 on:
   workflow_dispatch:
+    inputs:
+      simulate_rotation:
+        description: "Drill: run the live test with a bogus build_id so the auto-port path is exercised"
+        type: boolean
+        default: false
   schedule:
     # Every 6 hours.
     - cron: "0 */6 * * *"
 
+concurrency:
+  group: provider-health
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
+  CONFIG_RAW_URL: https://raw.githubusercontent.com/${{ github.repository }}/master/allanime-config.json
 
 jobs:
-  live-sources:
+  live:
     name: allanime live sources
     runs-on: ubuntu-latest
-    permissions:
-      issues: write
+    outputs:
+      result: ${{ steps.classify.outputs.result }}
+      class: ${{ steps.classify.outputs.class }}
+      reason: ${{ steps.classify.outputs.reason }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -30,39 +57,343 @@ jobs:
         with:
           workspaces: . -> target
 
-      - name: Run live sources test
-        id: live
+      - name: Build the live test once
+        run: cargo test -p anidoku-core --test allanime_live --no-run
+
+      - name: Drill — serve a bogus remote config
+        if: ${{ inputs.simulate_rotation }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/drill"
+          python3 - <<'PY'
+          import json, os
+          cfg = json.load(open("allanime-config.json"))
+          cfg["build_id"] = "1"  # unknown to the server -> bootstrap 404 -> "rotation"
+          json.dump(cfg, open(os.path.join(os.environ["RUNNER_TEMP"], "drill", "config.json"), "w"))
+          PY
+          (cd "$RUNNER_TEMP/drill" && nohup python3 -m http.server 8123 >/dev/null 2>&1 &)
+          sleep 1
+          echo "ANIDOKU_ALLANIME_CONFIG_URL=http://127.0.0.1:8123/config.json" >> "$GITHUB_ENV"
+          echo "DRILL=1" >> "$GITHUB_ENV"
+
+      - name: Live test (baked-in config)
+        id: baked
+        continue-on-error: true
         run: |
           set -o pipefail
-          cargo test -p anidoku-core --test allanime_live -- --ignored --nocapture 2>&1 | tee live.log
+          cargo test -p anidoku-core --test allanime_live -- --ignored --nocapture 2>&1 | tee live-baked.log
 
-      - name: Open/refresh tracking issue on failure
-        if: failure()
-        uses: actions/github-script@v7
+      - name: Live test (published remote config)
+        id: remote
+        if: ${{ !inputs.simulate_rotation }}
+        continue-on-error: true
+        env:
+          ANIDOKU_ALLANIME_CONFIG_URL: ${{ env.CONFIG_RAW_URL }}
+        run: |
+          set -o pipefail
+          cargo test -p anidoku-core --test allanime_live -- --ignored --nocapture 2>&1 | tee live-remote.log
+
+      - name: Classify
+        id: classify
+        env:
+          BAKED: ${{ steps.baked.outcome }}
+          REMOTE: ${{ steps.remote.outcome }}
+        run: |
+          classify() {  # <logfile> -> rotation|transient|unknown
+            if grep -Eq "bootstrap rejected|PROVIDER_ROTATED|missing episode.sourceUrls|AA_CRYPTO|tobeparsed|PersistedQueryNotFound|bad bootstrap response" "$1"; then echo rotation
+            elif grep -Eiq "timed out|timeout|connection (reset|refused|closed)|dns error|error sending request|tls|HTTP status (5[0-9][0-9]|429)" "$1"; then echo transient
+            else echo unknown; fi
+          }
+          reason() { grep -Eo "(sources|search|episodes): [^\"]*|panicked at[^\n]*" "$1" | head -1 | cut -c1-300; }
+
+          if [ "$BAKED" = "success" ] && { [ "$REMOTE" = "success" ] || [ "$REMOTE" = "skipped" ]; }; then
+            echo "result=ok" >> "$GITHUB_OUTPUT"; echo "class=none" >> "$GITHUB_OUTPUT"; echo "reason=" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if [ "$BAKED" = "success" ] && [ "$REMOTE" = "failure" ]; then
+            # The binary works but the *published* config breaks it: worst case
+            # for users, since installed apps prefer the remote config.
+            echo "result=fail" >> "$GITHUB_OUTPUT"; echo "class=remote-config" >> "$GITHUB_OUTPUT"
+            echo "reason=$(reason live-remote.log)" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          class=$(classify live-baked.log)
+          if [ "$class" = "transient" ] && [ -z "${DRILL:-}" ]; then
+            echo "transient failure — retrying once in 3 minutes"; sleep 180
+            set -o pipefail
+            if cargo test -p anidoku-core --test allanime_live -- --ignored --nocapture 2>&1 | tee live-baked.log; then
+              echo "result=ok" >> "$GITHUB_OUTPUT"; echo "class=none" >> "$GITHUB_OUTPUT"; echo "reason=" >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            class=$(classify live-baked.log)
+          fi
+          echo "result=fail" >> "$GITHUB_OUTPUT"; echo "class=$class" >> "$GITHUB_OUTPUT"
+          echo "reason=$(reason live-baked.log)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: live-logs
+          path: live-*.log
+          retention-days: 14
+
+  auto-port:
+    name: auto-port rotation (oracle)
+    needs: live
+    if: ${{ needs.live.outputs.class == 'rotation' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    outputs:
+      status: ${{ steps.done.outputs.status }}
+      build_id: ${{ steps.oracle.outputs.build_id }}
+      pr_url: ${{ steps.pr.outputs.url }}
+      detail: ${{ steps.done.outputs.detail }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The branch this run was triggered on: master for the schedule, or a
+          # feature branch when the drill is dispatched there.
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+
+      - name: Derive rotated values from the live web client
+        id: oracle
+        continue-on-error: true
+        run: npm run -s oracle | tee oracle.json
+
+      - name: Apply + verify (core gates + live test)
+        id: verify
+        if: ${{ steps.oracle.outputs.status == 'ok' }}
+        continue-on-error: true
+        run: |
+          set -euxo pipefail
+          npm run -s oracle:apply
+          cargo fmt --all
+          cargo fmt --all -- --check
+          cargo clippy -p anidoku-core --all-targets -- -D warnings
+          cargo test -p anidoku-core
+          cargo test -p anidoku-core --test allanime_live -- --ignored --nocapture 2>&1 | tee live-ported.log
+          git diff --stat
+
+      - name: Open auto-merging PR
+        id: pr
+        if: ${{ steps.verify.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BUILD_ID: ${{ steps.oracle.outputs.build_id }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- allanime-config.json core/src/provider/allanime/constants.rs; then
+            echo "url=" >> "$GITHUB_OUTPUT"; echo "nothing to port (already on buildId $BUILD_ID)"; exit 0
+          fi
+          branch="bot/allanime-rotation-$BUILD_ID"
+          git config user.name "anidoku-bot"
+          git config user.email "anidoku-bot@users.noreply.github.com"
+          git checkout -B "$branch"
+          git add allanime-config.json core/src/provider/allanime/constants.rs
+          git commit -q -F- <<EOM
+          fix(allanime): port buildId $BUILD_ID (auto-derived)
+
+          Derived by scripts/allanime-oracle from the live web client and
+          verified in this run: recomputed x-aa-boot matched the client's,
+          cargo test green, live sources test green.
+
+          Provider-health run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOM
+          git push -f origin "$branch"
+          issue=$(gh issue list --label provider-health --state open --json number --jq '.[0].number // empty')
+          body_file="$RUNNER_TEMP/pr-body.md"
+          {
+            echo "Automated port of an allanime rotation, derived by the Playwright oracle from the real web client (no bundle deobfuscation)."
+            echo
+            echo '```json'; cat oracle.json; echo '```'
+            echo
+            echo "### Verification (this run)"
+            echo "- recomputed \`x-aa-boot\` == header the web client sent"
+            echo "- \`cargo fmt/clippy/test -p anidoku-core\` green"
+            echo "- live sources test: $(grep -Eo 'got [0-9]+ sources' live-ported.log | head -1)"
+            echo
+            echo "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            [ -n "$issue" ] && echo && echo "Fixes #$issue"
+            echo
+            echo "Merging publishes \`allanime-config.json\` on master, which installed apps fetch — no release needed."
+          } > "$body_file"
+          url=$(gh pr list --head "$branch" --state open --json url --jq '.[0].url // empty')
+          if [ -z "$url" ]; then
+            url=$(gh pr create --base master --head "$branch" --label provider-health \
+              --title "fix(allanime): port buildId $BUILD_ID (auto-derived)" --body-file "$body_file")
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          # PRs opened with GITHUB_TOKEN don't trigger `on: pull_request`, so
+          # kick CI on the branch explicitly for the record.
+          gh workflow run ci.yml --ref "$branch" || true
+          # Gates already ran in this job; land it. --auto merges once any
+          # required checks pass (immediately when none are configured); fall
+          # back to a direct squash if auto-merge isn't enabled on the repo.
+          gh pr merge "$url" --squash --auto --delete-branch \
+            || gh pr merge "$url" --squash --delete-branch \
+            || echo "::warning::could not merge $url automatically"
+
+      - name: Summarise
+        id: done
+        if: always()
+        env:
+          ORACLE: ${{ steps.oracle.outcome }}
+          OSTATUS: ${{ steps.oracle.outputs.status }}
+          OREASON: ${{ steps.oracle.outputs.reason }}
+          VERIFY: ${{ steps.verify.outcome }}
+          PR: ${{ steps.pr.outputs.url }}
+          DRILL: ${{ inputs.simulate_rotation }}
+        run: |
+          if [ -n "$PR" ]; then s=ported; d="PR $PR"
+          elif [ "$DRILL" = "true" ] && [ "$OSTATUS" = "ok" ] && [ "$VERIFY" = "success" ]; then s=drill-ok; d="drill: oracle derived buildId $(jq -r .build_id oracle.json 2>/dev/null) and all gates passed (no PR: values already current)"
+          elif [ "$OSTATUS" = "ok" ] && [ "$VERIFY" = "success" ]; then s=no-change; d="oracle agrees with current constants but the live test fails — likely an aaReq/query-side change; needs a human"
+          elif [ "$OSTATUS" = "ok" ]; then s=verify-failed; d="oracle derived values but core gates / live test failed after applying them; needs a human"
+          elif [ "$OSTATUS" = "scheme-drift" ]; then s=scheme-drift; d="$OREASON"
+          else s=oracle-unreachable; d="${OREASON:-oracle could not observe the site (blocked/unreachable)}"; fi
+          echo "status=$s" >> "$GITHUB_OUTPUT"; echo "detail=$d" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: oracle-output
+          path: |
+            oracle.json
+            live-ported.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  report:
+    name: report
+    needs: [live, auto-port]
+    if: always() && needs.live.result != 'cancelled'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/github-script@v7
+        env:
+          RESULT: ${{ needs.live.outputs.result }}
+          CLASS: ${{ needs.live.outputs.class }}
+          REASON: ${{ needs.live.outputs.reason }}
+          PORT_STATUS: ${{ needs.auto-port.outputs.status }}
+          PORT_DETAIL: ${{ needs.auto-port.outputs.detail }}
+          PORT_PR: ${{ needs.auto-port.outputs.pr_url }}
+          PORT_BUILD: ${{ needs.auto-port.outputs.build_id }}
+          DRILL: ${{ inputs.simulate_rotation }}
         with:
           script: |
-            const title = "⚠️ allanime provider health check failing";
-            const body = [
-              "The scheduled live sources test failed — allanime has likely rotated its",
-              "crypto/scheme again, or the streaming API is down.",
-              "",
-              `Run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
-              "",
-              "Fix recipe lives in `core/src/provider/allanime/constants.rs` (doc-comment)",
-              "and the `anidoku-allanime-crypto` project memory. Once re-ported, publish",
-              "the updated `allanime-config.json` so installed apps self-heal.",
-            ].join("\n");
             const { owner, repo } = context.repo;
-            const existing = await github.rest.issues.listForRepo({
-              owner, repo, state: "open", labels: "provider-health",
-            });
-            if (existing.data.length > 0) {
-              await github.rest.issues.createComment({
-                owner, repo, issue_number: existing.data[0].number,
-                body: `Still failing as of ${new Date().toISOString()}.\n\n${body}`,
-              });
-            } else {
-              await github.rest.issues.create({
-                owner, repo, title, body, labels: ["provider-health"],
-              });
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const now = new Date().toISOString();
+            const { RESULT, CLASS, REASON, PORT_STATUS, PORT_DETAIL, PORT_PR, PORT_BUILD, DRILL } = process.env;
+            const LABEL = "provider-health";
+            const title = "⚠️ allanime provider health check failing";
+
+            if (DRILL === "true") {
+              // A drill must never touch the real tracking issue; it only proves
+              // the oracle + gates work on a GitHub runner.
+              if (PORT_STATUS === "drill-ok") core.info(`drill passed: ${PORT_DETAIL}`);
+              else core.setFailed(`drill failed: class=${CLASS} port=${PORT_STATUS} ${PORT_DETAIL || ""}`);
+              return;
             }
+
+            async function ensureLabel(name, color, description) {
+              try { await github.rest.issues.createLabel({ owner, repo, name, color, description }); }
+              catch (e) { if (e.status !== 422) throw e; }
+            }
+            await ensureLabel(LABEL, "d93f0b", "Scheduled allanime live test");
+            await ensureLabel("needs-human", "b60205", "Automation could not fix this");
+            await ensureLabel("stale-fix", "fbca04", "Provider fix PR open >24h");
+
+            const open = (await github.rest.issues.listForRepo({ owner, repo, state: "open", labels: LABEL, per_page: 5 }))
+              .data.filter(i => !i.pull_request);
+            const issue = open[0];
+
+            // ---- recovered -------------------------------------------------
+            if (RESULT === "ok") {
+              if (issue) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
+                  body: `✅ Recovered — the live sources test passed in [this run](${runUrl}) at ${now}.` });
+                await github.rest.issues.update({ owner, repo, issue_number: issue.number, state: "closed", state_reason: "completed" });
+              }
+              core.info("healthy");
+            } else {
+              // ---- failing: one issue, status block updated in place ---------
+              const state = `${CLASS}|${PORT_STATUS || ""}|${PORT_PR || ""}`;
+              const humanClass = {
+                rotation: "allanime rotated its crypto/scheme",
+                transient: "network/transient (retried once)",
+                "remote-config": "the *published* allanime-config.json breaks streaming while the baked-in config works",
+                unknown: "unclassified",
+              }[CLASS] || CLASS;
+              const portLine = !PORT_STATUS ? "not attempted (not a rotation)"
+                : PORT_STATUS === "ported" ? `✅ ported buildId ${PORT_BUILD} → ${PORT_PR} (auto-merge requested)`
+                : `❌ ${PORT_STATUS}: ${PORT_DETAIL}`;
+              const block = [
+                "<!-- health-status -->",
+                `<!-- state:${state} -->`,
+                "### Status",
+                `| | |`, `|---|---|`,
+                `| Last check | ${now} ([run](${runUrl}))${DRILL === "true" ? " **(drill)**" : ""} |`,
+                `| Classification | **${CLASS}** — ${humanClass} |`,
+                `| Reason | \`${(REASON || "see run log").replace(/`/g, "'")}\` |`,
+                `| Auto-port | ${portLine} |`,
+                "<!-- /health-status -->",
+              ].join("\n");
+              const intro = [
+                "The scheduled live sources test is failing. This issue is updated **in place** on every",
+                "6-hourly run (no per-run comments); comments are added only when the state changes.",
+                "",
+                "When the classification is `rotation`, the oracle (`scripts/allanime-oracle`) derives the",
+                "new values from the live web client and opens an auto-merging PR — merging publishes",
+                "`allanime-config.json`, which installed apps fetch, so no release is needed. If the",
+                "auto-port failed, run `npm run oracle -- --dry-run` locally and see the README there.",
+                "",
+              ].join("\n");
+              const needsHuman = ["scheme-drift", "verify-failed", "no-change", "oracle-unreachable"].includes(PORT_STATUS) || CLASS === "remote-config" || CLASS === "unknown";
+
+              if (!issue) {
+                const created = await github.rest.issues.create({ owner, repo, title, body: intro + block,
+                  labels: needsHuman ? [LABEL, "needs-human"] : [LABEL] });
+                core.info(`opened #${created.data.number}`);
+              } else {
+                const prev = (issue.body || "").match(/<!-- state:(.*?) -->/)?.[1];
+                const body = /<!-- health-status -->[\s\S]*<!-- \/health-status -->/.test(issue.body || "")
+                  ? issue.body.replace(/<!-- health-status -->[\s\S]*<!-- \/health-status -->/, block)
+                  : `${issue.body || ""}\n\n${block}`;
+                await github.rest.issues.update({ owner, repo, issue_number: issue.number, body });
+                if (prev !== state) {
+                  await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
+                    body: `State changed → **${CLASS}**; auto-port: ${portLine}\n\nRun: ${runUrl}` });
+                }
+                const hasLabel = issue.labels.some(l => l.name === "needs-human");
+                if (needsHuman && !hasLabel) await github.rest.issues.addLabels({ owner, repo, issue_number: issue.number, labels: ["needs-human"] });
+                if (!needsHuman && hasLabel) await github.rest.issues.removeLabel({ owner, repo, issue_number: issue.number, name: "needs-human" }).catch(() => {});
+              }
+            }
+
+            // ---- stale fix PR nudge (would have caught PR #4) ----------------
+            const prs = (await github.rest.pulls.list({ owner, repo, state: "open", per_page: 50 })).data
+              .filter(p => p.labels.some(l => l.name === LABEL));
+            for (const p of prs) {
+              const ageH = (Date.now() - new Date(p.created_at).getTime()) / 36e5;
+              if (ageH < 24 || p.labels.some(l => l.name === "stale-fix")) continue;
+              await github.rest.issues.addLabels({ owner, repo, issue_number: p.number, labels: ["stale-fix"] });
+              await github.rest.issues.createComment({ owner, repo, issue_number: p.number,
+                body: `⏰ This provider fix has been open for ${Math.floor(ageH)}h. Every hour it sits here is an hour streaming stays broken for installed apps — merge it (or close it if superseded).` });
+            }
+
+            if (RESULT !== "ok") core.setFailed(`provider health: ${CLASS} — ${REASON || "see log"}`);
