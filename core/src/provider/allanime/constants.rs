@@ -44,19 +44,39 @@
 //! buildId/mask/hosts still need tracking. (`show{ _id }` in the query is
 //! required — `sourceUrls` alone trips a server resolver bug.)
 
+//!
+//! **2026-08-07 rotation (buildId 86 -> 92).** Constants-only (PR #4, never
+//! merged — see the 2026-09 notes for why that can't happen again).
+//!
+//! **2026-09 rotation (buildId -> 166, boot-signature scheme change).** Found
+//! 2026-09-09 after the health check had been red for a month. Besides the usual
+//! buildId/mask bump, the `x-aa-boot` derivation changed *shape*: the inner
+//! HMAC label rotated from `aa-boot:` to `ld1faaOf3G:` ([`BOOT_LABEL`]) and the
+//! outer signature's field order became `keyGroup:lane:epoch:refererHost:buildId`
+//! ([`BOOT_SIG_TEMPLATE`]). Both are now runtime-overridable config, not code.
+//! The bootstrap response also started self-describing its bucket
+//! (`epochMs`/`graceMs`); we log when it disagrees with [`EPOCH_BUCKET_MS`].
+//!
+//! Derivation is no longer done by reading the obfuscated bundle: the Playwright
+//! oracle in `scripts/allanime-oracle/` drives the real site with WebCrypto
+//! hooked and captures mask/label/template/buildId directly (identifier renames
+//! can't break it). The `provider-health.yml` workflow runs it on failure and
+//! opens an auto-merging PR. Run it locally with `npm run oracle`.
+
 /// URL of the optional remote config JSON that overrides the rotatable
 /// constants below (see [`AllAnimeConfig`](super::config::AllAnimeConfig)). This
 /// is the release-free kill-switch for provider rotations: publish updated
 /// `build_id`/`qd_mask_hex`/hosts here and installed apps self-heal on the next
 /// play attempt.
 ///
-/// **Empty by default = disabled** (no network call, pure baked-in behaviour).
-/// Set it to a raw-hosted JSON you control — e.g. a GitHub raw URL like
-/// `https://raw.githubusercontent.com/<you>/AniDoku/main/allanime-config.json`,
-/// or a gist's raw URL. `allanime-config.json` in the repo root is a ready-made
+/// Points at `allanime-config.json` on this repo's `master` (raw GitHub, ~5 min
+/// cache), which the provider-health auto-port PR updates and auto-merges —
+/// so merging *is* publishing. Set it to `""` to disable (no network call, pure
+/// baked-in behaviour). `allanime-config.json` in the repo root is a ready-made
 /// starting point mirroring the current defaults. A per-run override is also
 /// read from the `ANIDOKU_ALLANIME_CONFIG_URL` env var (handy on desktop).
-pub const REMOTE_CONFIG_URL: &str = "";
+pub const REMOTE_CONFIG_URL: &str =
+    "https://raw.githubusercontent.com/serplay/anidoku/master/allanime-config.json";
 
 /// Browser user agent sent with every request (ani-cli `$agent`).
 pub const USER_AGENT: &str =
@@ -81,13 +101,14 @@ pub const API_URL: &str = "https://api.mkissa.net/api";
 /// Client build id, sent as the `x-build-id` header and used inside the aaReq /
 /// x-aa-boot tokens and the bootstrap request. Baked into the web client (the
 /// crypto bundle: `qf = (ta(..)+ta(..)) !== "string" ? "86" : ""`). Rotates
-/// often — 63 (mid-Jul), 75 (2026-07-30), 81 (2026-08-02), 86 (2026-08-05).
-pub const BUILD_ID: &str = "86";
+/// often — 63 (mid-Jul), 75 (2026-07-30), 81 (2026-08-02), 86 (2026-08-05),
+/// 92 (2026-08-07), 166 (seen 2026-09-09).
+pub const BUILD_ID: &str = "166";
 
 /// Per-epoch key bootstrap endpoint (base; the `?buildId=&k=<lane>` query is
 /// built at call time). Returns `{"epoch":<int>,"partB":<b64>,"switchAt":..}`;
 /// the AES key is `base64(partB) XOR QD_MASK`. Requires the signed `x-aa-boot`
-/// header (see [`AA_BOOT_PREFIX`], [`KEY_GROUP`], [`REFERER_HOST`]).
+/// header (see [`BOOT_LABEL`], [`BOOT_SIG_TEMPLATE`], [`KEY_GROUP`], [`REFERER_HOST`]).
 pub const BOOTSTRAP_URL: &str = "https://api.mkissa.net/client-crypto/v1/bootstrap";
 
 /// Content lane for the `episode(...)` source query (web client `If`). Sent as
@@ -107,9 +128,21 @@ pub const KEY_GROUP: &str = "mkissa";
 /// HTTP `Referer`/`Origin` header value.
 pub const REFERER_HOST: &str = "mkissa.to";
 
-/// HMAC label prefixing the buildId to derive the `x-aa-boot` inner key
-/// (`bg(mask, "aa-boot:" + buildId)` in the web client's `PS`).
-pub const AA_BOOT_PREFIX: &str = "aa-boot:";
+/// Label prefixing the buildId in the `x-aa-boot` inner-key derivation:
+/// `inner = HMAC(mask, BOOT_LABEL + buildId)`. Was `aa-boot:` until 2026-09;
+/// it is now an opaque rotating string, so it lives in the config too.
+pub const BOOT_LABEL: &str = "ld1faaOf3G:";
+
+/// Template for the `x-aa-boot` outer signature. Placeholders `{build_id}`,
+/// `{key_group}`, `{referer_host}`, `{epoch}`, `{lane}` are substituted at
+/// sign time (`decrypt::render_template`). Was
+/// `{build_id}:{key_group}:{referer_host}:{epoch}:{lane}` until 2026-09.
+pub const BOOT_SIG_TEMPLATE: &str = "{key_group}:{lane}:{epoch}:{referer_host}:{build_id}";
+
+/// Template for the aaReq nonce seed (`SHA-256(seed)[..12]`). Placeholders
+/// `{epoch}`, `{build_id}`, `{qh}`, `{ts}`, `{lane}`. Unchanged so far; made
+/// overridable because it is the next most likely thing to rotate.
+pub const AA_REQ_SEED_TEMPLATE: &str = "{epoch}:{build_id}:{qh}:{ts}:{lane}";
 
 /// Bucket (ms) the `x-aa-boot` epoch is floored to (web client `Rv`).
 /// `epoch = floor(now_ms / EPOCH_BUCKET_MS)`. Rotated 3 days -> 7 days on
@@ -120,7 +153,7 @@ pub const EPOCH_BUCKET_MS: u128 = 604_800_000;
 /// Static mask XORed with the bootstrap `partB` to derive the AES-256 key, and
 /// HMAC-keyed for `x-aa-boot`. The web client computes it as `ev(buildId)` (was
 /// `Fh`) over an embedded `ad` byte-array, so it rotates with `BUILD_ID`.
-pub const QD_MASK_HEX: &str = "4d3a54eaa825c7ae97c44ebd9c0a3d433555f976ec7df09b0450e26f843a8d25";
+pub const QD_MASK_HEX: &str = "93bf9583f597adb57f0823c99532cdc02a359c1a0f04a8a6b935d1e34587a27b";
 
 /// The `episode(...)` sources GraphQL query we send.
 ///

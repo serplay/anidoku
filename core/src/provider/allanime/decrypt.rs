@@ -97,23 +97,51 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     outer.finalize().into()
 }
 
-/// Sign the `x-aa-boot` header the bootstrap endpoint now requires (web client
-/// `PS`). Two chained HMAC-SHA256s over the static mask, hex-encoded:
-/// `hex(HMAC(HMAC(mask, "aa-boot:<buildId>"), "<buildId>:<keyGroup>:<refererHost>:<epoch>:<lane>"))`.
+/// Substitute `{name}` placeholders in a config template. Unknown placeholders
+/// are left verbatim (they'd then fail signature verification server-side,
+/// which the live test surfaces) rather than erroring.
+pub fn render_template(template: &str, fields: &[(&str, &str)]) -> String {
+    let mut out = template.to_string();
+    for (name, value) in fields {
+        out = out.replace(&format!("{{{name}}}"), value);
+    }
+    out
+}
+
+/// Fields the `x-aa-boot` signature is built from.
+pub struct BootSig<'a> {
+    pub build_id: &'a str,
+    pub key_group: &'a str,
+    pub referer_host: &'a str,
+    pub epoch: u64,
+    pub lane: &'a str,
+}
+
+/// Sign the `x-aa-boot` header the bootstrap endpoint requires. Two chained
+/// HMAC-SHA256s over the static mask, hex-encoded:
+/// `hex(HMAC(HMAC(mask, label + buildId), render(sig_template)))`.
+///
+/// Both the label and the signature field order have rotated (2026-09), so
+/// they come from config rather than being baked in here.
 pub fn sign_aa_boot(
     mask_hex: &str,
-    build_id: &str,
-    key_group: &str,
-    referer_host: &str,
-    epoch: u64,
-    lane: &str,
+    label: &str,
+    sig_template: &str,
+    f: &BootSig<'_>,
 ) -> Result<String> {
     let mask = hex::decode(mask_hex).map_err(|e| Error::Decrypt(format!("bad mask hex: {e}")))?;
-    let inner_key = hmac_sha256(
-        &mask,
-        format!("{}{build_id}", super::AA_BOOT_PREFIX).as_bytes(),
+    let inner_key = hmac_sha256(&mask, format!("{label}{}", f.build_id).as_bytes());
+    let epoch = f.epoch.to_string();
+    let sig = render_template(
+        sig_template,
+        &[
+            ("build_id", f.build_id),
+            ("key_group", f.key_group),
+            ("referer_host", f.referer_host),
+            ("epoch", &epoch),
+            ("lane", f.lane),
+        ],
     );
-    let sig = format!("{build_id}:{key_group}:{referer_host}:{epoch}:{lane}");
     let mac = hmac_sha256(&inner_key, sig.as_bytes());
     Ok(hex::encode(mac))
 }
@@ -121,12 +149,15 @@ pub fn sign_aa_boot(
 /// Sign an `aaReq` token the `episode(...)` GraphQL query now requires.
 ///
 /// Mirrors the web client (`r2`): build a compact JSON payload, derive a 12-byte
-/// nonce as `SHA-256("epoch:buildId:qh:ts:lane")[..12]`, AES-256-GCM encrypt the
+/// nonce as `SHA-256(render(seed_template))[..12]` (default seed
+/// `epoch:buildId:qh:ts:lane`), AES-256-GCM encrypt the
 /// payload, and base64 the envelope `0x01 || nonce(12) || ciphertext+tag`.
 /// `now_ms` is floored to a 5-minute bucket so the token stays stable within a
 /// window and the server accepts it as fresh.
+#[allow(clippy::too_many_arguments)]
 pub fn sign_aa_req(
     key: &[u8; 32],
+    seed_template: &str,
     epoch: u64,
     build_id: &str,
     query_hash: &str,
@@ -140,7 +171,17 @@ pub fn sign_aa_req(
         r#"{{"v":1,"ts":{ts},"epoch":{epoch},"buildId":"{build_id}","qh":"{query_hash}","k":"{lane}"}}"#
     );
 
-    let seed = format!("{epoch}:{build_id}:{query_hash}:{ts}:{lane}");
+    let (epoch_s, ts_s) = (epoch.to_string(), ts.to_string());
+    let seed = render_template(
+        seed_template,
+        &[
+            ("epoch", epoch_s.as_str()),
+            ("build_id", build_id),
+            ("qh", query_hash),
+            ("ts", ts_s.as_str()),
+            ("lane", lane),
+        ],
+    );
     let nonce_bytes = Sha256::digest(seed.as_bytes());
     let nonce = Nonce::from_slice(&nonce_bytes[..12]);
 
@@ -312,7 +353,16 @@ mod tests {
         // A ts already aligned to the 5-minute bucket, so the token is exact.
         let now_ms = 1_784_600_000_000u128;
         let lane = "k7";
-        let token = sign_aa_req(&key, epoch, "75", qh, lane, now_ms).unwrap();
+        let token = sign_aa_req(
+            &key,
+            super::super::AA_REQ_SEED_TEMPLATE,
+            epoch,
+            "75",
+            qh,
+            lane,
+            now_ms,
+        )
+        .unwrap();
 
         // Envelope: 0x01 || nonce(12) || ciphertext+tag. Recover and verify it
         // decrypts (i.e. the GCM tag is valid) back to the expected payload.
@@ -337,22 +387,59 @@ mod tests {
     }
 
     #[test]
-    fn aa_boot_matches_web_client() {
-        // Cross-checked against the live web client's `PS()` run in Node:
+    fn aa_boot_matches_legacy_web_client() {
+        // The pre-2026-09 scheme, cross-checked against the live web client's
+        // `PS()` run in Node at the time:
         // hex(HMAC(HMAC(mask,"aa-boot:75"), "75:mkissa:mkissa.to:6887:k7")).
+        // Expressed purely as data — proves the template switch is lossless.
         let got = sign_aa_boot(
             "ff65f1ba05d2556424dfec9f38f816e0a7d284a951845c865a609cb83bee7690",
-            "75",
-            "mkissa",
-            "mkissa.to",
-            6887,
-            "k7",
+            "aa-boot:",
+            "{build_id}:{key_group}:{referer_host}:{epoch}:{lane}",
+            &BootSig {
+                build_id: "75",
+                key_group: "mkissa",
+                referer_host: "mkissa.to",
+                epoch: 6887,
+                lane: "k7",
+            },
         )
         .unwrap();
-        assert_eq!(got.len(), 64);
         assert_eq!(
             got,
             "7eb17241a906398c25974817c90cbcf1ad9333ba5851161c5b2ac1c25f34e898"
+        );
+    }
+
+    #[test]
+    fn aa_boot_matches_live_client_2026_09() {
+        // Captured 2026-09-09 by hooking SubtleCrypto in the real web client
+        // (scripts/allanime-oracle): importKey(HMAC, mask), sign("ld1faaOf3G:166"),
+        // then sign("mkissa:k7:2957:mkissa.to:166") -> the x-aa-boot header sent.
+        let got = sign_aa_boot(
+            super::super::QD_MASK_HEX,
+            super::super::BOOT_LABEL,
+            super::super::BOOT_SIG_TEMPLATE,
+            &BootSig {
+                build_id: "166",
+                key_group: "mkissa",
+                referer_host: "mkissa.to",
+                epoch: 2957,
+                lane: "k7",
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            got,
+            "59199a3a63e6c8cb88c9204aa2aa2321401005d5b0852d6a027bb7973d3e5474"
+        );
+    }
+
+    #[test]
+    fn render_template_substitutes_and_keeps_unknown() {
+        assert_eq!(
+            render_template("{a}-{b}-{c}", &[("a", "1"), ("b", "2")]),
+            "1-2-{c}"
         );
     }
 }

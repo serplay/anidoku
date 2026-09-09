@@ -55,6 +55,12 @@ pub struct AllAnimeConfig {
     pub episode_query: String,
     /// Bucket (ms) the `x-aa-boot` epoch is floored to.
     pub epoch_bucket_ms: u128,
+    /// Label prefixing the buildId in the `x-aa-boot` inner-key HMAC.
+    pub boot_label: String,
+    /// `x-aa-boot` outer-signature template (see [`BOOT_SIG_TEMPLATE`]).
+    pub boot_sig_template: String,
+    /// aaReq nonce-seed template (see [`AA_REQ_SEED_TEMPLATE`]).
+    pub aa_req_seed_template: String,
 }
 
 impl Default for AllAnimeConfig {
@@ -71,6 +77,9 @@ impl Default for AllAnimeConfig {
             qd_mask_hex: QD_MASK_HEX.to_string(),
             episode_query: EPISODE_SOURCES_GQL.to_string(),
             epoch_bucket_ms: EPOCH_BUCKET_MS,
+            boot_label: BOOT_LABEL.to_string(),
+            boot_sig_template: BOOT_SIG_TEMPLATE.to_string(),
+            aa_req_seed_template: AA_REQ_SEED_TEMPLATE.to_string(),
         }
     }
 }
@@ -104,6 +113,24 @@ impl AllAnimeConfig {
         }
         if self.epoch_bucket_ms == 0 {
             return Err("allanime config epoch_bucket_ms is zero".into());
+        }
+        // A template missing a placeholder would sign the wrong thing forever;
+        // reject it so the previous config stays live.
+        for ph in [
+            "{build_id}",
+            "{key_group}",
+            "{referer_host}",
+            "{epoch}",
+            "{lane}",
+        ] {
+            if !self.boot_sig_template.contains(ph) {
+                return Err(format!("allanime config boot_sig_template lacks {ph}"));
+            }
+        }
+        for ph in ["{epoch}", "{build_id}", "{qh}", "{ts}", "{lane}"] {
+            if !self.aa_req_seed_template.contains(ph) {
+                return Err(format!("allanime config aa_req_seed_template lacks {ph}"));
+            }
         }
         Ok(())
     }
@@ -152,6 +179,24 @@ mod tests {
             r#"{"qd_mask_hex":"zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn rejects_templates_missing_placeholders() {
+        assert!(
+            AllAnimeConfig::parse_validated(r#"{"boot_sig_template":"{build_id}:{epoch}"}"#)
+                .is_err()
+        );
+        assert!(AllAnimeConfig::parse_validated(
+            r#"{"aa_req_seed_template":"{epoch}:{build_id}"}"#
+        )
+        .is_err());
+        // The pre-2026-09 scheme is expressible as data.
+        let legacy = AllAnimeConfig::parse_validated(
+            r#"{"boot_label":"aa-boot:","boot_sig_template":"{build_id}:{key_group}:{referer_host}:{epoch}:{lane}"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.boot_label, "aa-boot:");
     }
 
     #[test]

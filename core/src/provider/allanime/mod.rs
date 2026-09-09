@@ -54,6 +54,38 @@ struct Bootstrap {
     epoch: u64,
     #[serde(rename = "partB")]
     part_b: String,
+    /// Bucket the server used for `epoch` (self-describing since 2026-09). We
+    /// can't use it *before* signing, but a mismatch with the config is the
+    /// tell-tale of a bucket rotation, so it's logged loudly.
+    #[serde(rename = "epochMs", default)]
+    epoch_ms: Option<u64>,
+}
+
+/// Prefix on provider errors whose shape says "allanime rotated its scheme"
+/// (as opposed to a network blip or a genuinely source-less episode). The
+/// frontend keys its "streaming source changed — check for fix" state off it
+/// and the health workflow uses it to classify a failure as auto-portable.
+pub const ROTATED_PREFIX: &str = "PROVIDER_ROTATED: ";
+
+/// Wrap a provider error as a rotation if its message matches a known
+/// rotation signature. Idempotent.
+fn classify_rotation(err: Error) -> Error {
+    const SIGNATURES: [&str; 6] = [
+        "bootstrap rejected",
+        "bad bootstrap response",
+        "missing episode.sourceUrls",
+        "AA_CRYPTO",
+        "tobeparsed",
+        "PersistedQueryNotFound",
+    ];
+    match err {
+        Error::Provider(msg) | Error::Decrypt(msg)
+            if !msg.starts_with(ROTATED_PREFIX) && SIGNATURES.iter().any(|s| msg.contains(s)) =>
+        {
+            Error::Provider(format!("{ROTATED_PREFIX}{msg}"))
+        }
+        other => other,
+    }
 }
 
 /// Client-computed epoch candidates for the `x-aa-boot` signature, mirroring the
@@ -192,11 +224,15 @@ impl AllAnime {
         for epoch in epoch_candidates(cfg.epoch_bucket_ms, now_ms) {
             let aa_boot = decrypt::sign_aa_boot(
                 &cfg.qd_mask_hex,
-                &cfg.build_id,
-                &cfg.key_group,
-                &cfg.referer_host,
-                epoch,
-                lane,
+                &cfg.boot_label,
+                &cfg.boot_sig_template,
+                &decrypt::BootSig {
+                    build_id: &cfg.build_id,
+                    key_group: &cfg.key_group,
+                    referer_host: &cfg.referer_host,
+                    epoch,
+                    lane,
+                },
             )?;
             let resp = self
                 .client
@@ -215,10 +251,19 @@ impl AllAnime {
                 )));
                 continue;
             }
-            return resp
+            let boot = resp
                 .json::<Bootstrap>()
                 .await
-                .map_err(|e| Error::Provider(format!("sources: bad bootstrap response: {e}")));
+                .map_err(|e| Error::Provider(format!("sources: bad bootstrap response: {e}")))?;
+            if let Some(ms) = boot.epoch_ms {
+                if u128::from(ms) != cfg.epoch_bucket_ms {
+                    eprintln!(
+                        "[allanime] WARNING: bootstrap epochMs={ms} but config epoch_bucket_ms={} — bucket rotated, update the config",
+                        cfg.epoch_bucket_ms
+                    );
+                }
+            }
+            return Ok(boot);
         }
         Err(last_err
             .unwrap_or_else(|| Error::Provider("sources: bootstrap: no epoch candidates".into())))
@@ -421,9 +466,10 @@ impl Provider for AllAnime {
         if self.refresh_config(false).await {
             return self
                 .sources_with(&self.config(), show_id, episode, mode)
-                .await;
+                .await
+                .map_err(classify_rotation);
         }
-        first
+        first.map_err(classify_rotation)
     }
 }
 
@@ -449,6 +495,7 @@ impl AllAnime {
         let query_hash = decrypt::sha256_hex(&cfg.episode_query);
         let aa_req = decrypt::sign_aa_req(
             &key,
+            &cfg.aa_req_seed_template,
             boot.epoch,
             &cfg.build_id,
             &query_hash,
@@ -767,6 +814,20 @@ mod tests {
             assert!(!provider.refresh_config(true).await);
             assert_eq!(provider.config().build_id, BUILD_ID);
         }
+    }
+
+    #[test]
+    fn classify_rotation_prefixes_only_rotation_shapes() {
+        let e = classify_rotation(Error::Provider(
+            "sources: bootstrap rejected epoch 2957 (404 Not Found)".into(),
+        ));
+        assert!(e.to_string().contains(ROTATED_PREFIX), "{e}");
+        // Idempotent.
+        let again = classify_rotation(e);
+        assert_eq!(again.to_string().matches(ROTATED_PREFIX).count(), 1);
+        // A plain provider error (e.g. a bad search body) is left alone.
+        let plain = classify_rotation(Error::Provider("search: invalid json: x".into()));
+        assert!(!plain.to_string().contains(ROTATED_PREFIX));
     }
 
     #[test]
