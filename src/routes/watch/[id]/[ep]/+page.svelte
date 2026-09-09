@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { goto } from '$app/navigation';
+	import { untrack } from 'svelte';
 	import Hls from 'hls.js';
 	import {
 		getSources,
@@ -10,6 +11,8 @@
 		convertSubtitles,
 		getAnimeListState,
 		isDesktop,
+		isProviderRotated,
+		refreshProviderConfig,
 		mediaBase,
 		mediaUrl,
 		getOfflineInfo,
@@ -18,9 +21,10 @@
 		type SubtitleTrack,
 		type OfflineInfo
 	} from '$lib/api';
-	import { recallAnime } from '$lib/state.svelte';
+	import { recallAnime, pushToast } from '$lib/state.svelte';
 	import Button from '$lib/components/Button.svelte';
 	import Skeleton from '$lib/components/Skeleton.svelte';
+	import ProviderOutage from '$lib/components/ProviderOutage.svelte';
 	import { getCurrentWindow } from '@tauri-apps/api/window';
 
 	const id = $derived(decodeURIComponent(page.params.id ?? ''));
@@ -38,6 +42,10 @@
 	// playable hosts (some shows are searchable but source-less). Rendered as a
 	// calm empty-state, not a failure.
 	let noSources = $state(false);
+	// The provider rotated its scheme (backend tagged the error). Rendered as an
+	// actionable "check for fix" state rather than a raw error string.
+	let providerOutage = $state<string | null>(null);
+	let checkingFix = $state(false);
 	// Completed download for this episode, when playing offline.
 	let offline = $state<OfflineInfo | null>(null);
 	// User opted out of the offline copy for this episode ("Stream instead").
@@ -73,7 +81,12 @@
 	const qualities = $derived(sources.map((s) => s.quality));
 
 	$effect(() => {
-		void load(id, ep, dub);
+		// Re-run only when the route changes. `load` reads other reactive state
+		// synchronously (the summary cache, forceStream) which the layout can
+		// populate right after mount — without `untrack` that re-triggered a
+		// second, redundant sources fetch on every watch-page open.
+		const [showId, episode, isDub] = [id, ep, dub];
+		untrack(() => void load(showId, episode, isDub));
 		return () => teardown();
 	});
 
@@ -81,6 +94,7 @@
 		loading = true;
 		error = null;
 		noSources = false;
+		providerOutage = null;
 		selected = null;
 		// Ensure the AniList mapping exists before auto-progress needs it —
 		// the detail page resolves it too, but a deep link / restart may not
@@ -142,9 +156,30 @@
 				selectSource(srcs[0]);
 			}
 		} catch (e) {
-			error = e instanceof Error ? e.message : String(e);
+			const msg = e instanceof Error ? e.message : String(e);
+			if (isProviderRotated(msg)) providerOutage = msg;
+			else error = msg;
 		} finally {
 			loading = false;
+		}
+	}
+
+	// "Check for fix": force-fetch the published provider config and, if it
+	// changed, reload sources. Otherwise tell the user plainly.
+	async function checkForFix() {
+		checkingFix = true;
+		try {
+			const r = await refreshProviderConfig();
+			if (r.changed) {
+				pushToast(`Provider fix applied (build ${r.build_id}) — retrying…`, 'sync');
+				await load(id, ep, dub);
+			} else {
+				pushToast('No fix published yet — try again in a little while.', 'info');
+			}
+		} catch (e) {
+			pushToast(e instanceof Error ? e.message : String(e), 'info');
+		} finally {
+			checkingFix = false;
 		}
 	}
 
@@ -399,6 +434,13 @@
 			switch sub/dub, or check back later.
 		</p>
 	</div>
+{:else if providerOutage && !selected}
+	<ProviderOutage
+		detail={providerOutage}
+		checking={checkingFix}
+		oncheck={() => void checkForFix()}
+		onretry={() => void load(id, ep, dub)}
+	/>
 {:else if error && !selected}
 	<p class="error">{error}</p>
 {:else}

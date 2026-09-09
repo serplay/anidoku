@@ -12,7 +12,9 @@
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
 		"test:e2e": "playwright test",
 		"test:e2e:ui": "playwright test --ui",
-		"tauri": "tauri"
+		"tauri": "tauri",
+		"oracle": "node --experimental-strip-types --no-warnings scripts/allanime-oracle/derive.ts",
+		"oracle:apply": "node scripts/allanime-oracle/apply-constants.mjs"
 	},
 	"dependencies": {
 		"@fontsource/ibm-plex-sans": "^5.2.5",

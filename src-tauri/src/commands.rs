@@ -193,13 +193,42 @@ pub struct Settings {
     pub client_id: Option<String>,
     /// The exact redirect URL the user must register on their AniList client.
     pub redirect_url: String,
+    /// Streaming provider's current build id (rotates with allanime).
+    pub provider_build_id: String,
+    /// `"baked"` or `"remote"` — whether the self-heal config has been applied.
+    pub provider_config_source: String,
 }
 
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> CmdResult<Settings> {
+    let status = state.provider.status();
     Ok(Settings {
         client_id: state.auth.client_id(),
         redirect_url: auth::REDIRECT_URL.to_string(),
+        provider_build_id: status.build_id,
+        provider_config_source: status.config_source.to_string(),
+    })
+}
+
+#[derive(Serialize)]
+pub struct ProviderRefresh {
+    /// True when a newer remote config was fetched and applied.
+    pub changed: bool,
+    pub build_id: String,
+    pub config_source: String,
+}
+
+/// Force-fetch the provider's remote config (the "Check for fix" button when
+/// the provider has rotated and the user doesn't want to wait for the next
+/// automatic self-heal attempt).
+#[tauri::command]
+pub async fn refresh_provider_config(state: State<'_, AppState>) -> CmdResult<ProviderRefresh> {
+    let changed = state.provider.refresh_config(true).await;
+    let status = state.provider.status();
+    Ok(ProviderRefresh {
+        changed,
+        build_id: status.build_id,
+        config_source: status.config_source.to_string(),
     })
 }
 

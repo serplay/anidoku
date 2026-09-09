@@ -235,6 +235,7 @@ pub fn run() {
             commands::airing_refresh_now,
             commands::get_notify_planning,
             commands::set_notify_planning,
+            commands::refresh_provider_config,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AniDoku")

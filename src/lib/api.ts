@@ -176,6 +176,30 @@ export interface MediaOverview {
 export interface Settings {
 	client_id: string | null;
 	redirect_url: string;
+	/** Streaming provider build id (rotates with allanime). */
+	provider_build_id?: string;
+	/** "baked" | "remote" — whether the self-heal remote config has been applied. */
+	provider_config_source?: string;
+}
+
+export interface ProviderRefresh {
+	changed: boolean;
+	build_id: string;
+	config_source: string;
+}
+
+/** Prefix the backend puts on errors whose shape means "the streaming
+ * provider rotated its scheme" (vs. a network blip). Mirrors
+ * anidoku_core::provider::allanime::ROTATED_PREFIX. */
+export const PROVIDER_ROTATED_PREFIX = 'PROVIDER_ROTATED: ';
+
+export function isProviderRotated(message: string): boolean {
+	return message.includes(PROVIDER_ROTATED_PREFIX);
+}
+
+/** Force-fetch the provider's remote config ("Check for fix"). */
+export function refreshProviderConfig(): Promise<ProviderRefresh> {
+	return invoke('refresh_provider_config');
 }
 
 export interface AuthStatus {

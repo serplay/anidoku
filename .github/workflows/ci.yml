@@ -72,6 +72,26 @@ jobs:
           path: playwright-report/
           retention-days: 7
 
+  # The allanime rotation oracle (scripts/allanime-oracle) must not bit-rot
+  # silently: type-strip/parse it, and prove allanime-config.json and the
+  # baked-in constants are in lockstep by running the applier as a no-op.
+  oracle-smoke:
+    name: oracle (parse + config/constants lockstep)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Parse derive.ts (no network)
+        run: node --experimental-strip-types --no-warnings --check scripts/allanime-oracle/derive.ts
+      - name: allanime-config.json ↔ constants.rs lockstep
+        run: |
+          npm run -s oracle:apply
+          git diff --exit-code -- core/src/provider/allanime/constants.rs
+
   # Compile-check the full Tauri desktop app (pulls in the system webkit deps).
   # Check-only — a full bundle isn't needed to catch breakage on the Rust side.
   tauri-check:

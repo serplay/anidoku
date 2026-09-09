@@ -7,6 +7,17 @@ import type { Page } from '@playwright/test';
  */
 export type CommandResponses = Record<string, unknown>;
 
+/** Make `invoke(cmd)` reject with this message (Tauri rejects with a string). */
+export function reject(message: string): { __reject: string } {
+	return { __reject: message };
+}
+
+/** Per-call responses: the Nth `invoke(cmd)` gets `sequence[N]` (the last
+ * entry repeats). Entries may be `reject(...)`. */
+export function sequence(...responses: unknown[]): { __sequence: unknown[] } {
+	return { __sequence: responses };
+}
+
 /**
  * Install a fake `window.__TAURI_INTERNALS__` before the app's scripts run, so
  * `isDesktop()` reports true and every `invoke()` / event subscription resolves
@@ -26,7 +37,13 @@ export async function mockTauri(page: Page, commands: CommandResponses = {}): Pr
 			media_base: 'http://mock.localhost',
 			anilist_status: { logged_in: false },
 			unread_notifications: 0,
-			get_settings: {},
+			get_settings: {
+				client_id: null,
+				redirect_url: 'http://127.0.0.1:8737/callback',
+				provider_build_id: '166',
+				provider_config_source: 'baked'
+			},
+			refresh_provider_config: { changed: false, build_id: '166', config_source: 'baked' },
 			get_watch_state: null,
 			list_watch_states: [],
 			get_offline_info: null,
@@ -50,6 +67,22 @@ export async function mockTauri(page: Page, commands: CommandResponses = {}): Pr
 		// Record IPC calls so tests can assert what the frontend requested.
 		const calls: Array<{ cmd: string; args: unknown }> = [];
 		(window as unknown as { __IPC_CALLS__: typeof calls }).__IPC_CALLS__ = calls;
+		const seen = new Map<string, number>();
+
+		// Unwrap the `reject(...)` / `sequence(...)` markers. Throws for a
+		// rejection so `invoke()` turns it into a rejected promise.
+		function materialise(cmd: string, value: unknown): unknown {
+			if (value && typeof value === 'object' && '__sequence' in value) {
+				const seq = (value as { __sequence: unknown[] }).__sequence;
+				const n = seen.get(cmd) ?? 0;
+				seen.set(cmd, n + 1);
+				return materialise(cmd, seq[Math.min(n, seq.length - 1)]);
+			}
+			if (value && typeof value === 'object' && '__reject' in value) {
+				throw (value as { __reject: string }).__reject;
+			}
+			return value;
+		}
 
 		function resolveInvoke(cmd: string, args: unknown): unknown {
 			// Event plugin: pretend to subscribe/unsubscribe. `listen` expects a
@@ -60,7 +93,7 @@ export async function mockTauri(page: Page, commands: CommandResponses = {}): Pr
 			if (cmd.startsWith('plugin:')) return null;
 
 			calls.push({ cmd, args });
-			if (Object.prototype.hasOwnProperty.call(cmds, cmd)) return cmds[cmd];
+			if (Object.prototype.hasOwnProperty.call(cmds, cmd)) return materialise(cmd, cmds[cmd]);
 			if (Object.prototype.hasOwnProperty.call(defaults, cmd)) return defaults[cmd];
 			return null;
 		}
