@@ -148,6 +148,7 @@ export function animeFixture(over: Partial<Record<string, unknown>> = {}) {
  * element errors — used to drive the player's auto-advance path. */
 export function sourceFixture(over: Partial<Record<string, unknown>> = {}) {
 	return {
+		source: 'allanime',
 		provider_name: 'Default',
 		quality: '1080',
 		url: 'http://127.0.0.1:9/nonexistent.mp4',

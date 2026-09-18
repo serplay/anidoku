@@ -226,8 +226,8 @@ export function setSourceEnabled(source: string, enabled: boolean): Promise<void
 }
 
 /** Pin which source a show plays from (the watch page's manual pick). */
-export function setPreferredSource(anilistId: number, source: string): Promise<void> {
-	return invoke('set_preferred_source', { anilistId, source });
+export function setPreferredSource(showId: string, source: string): Promise<void> {
+	return invoke('set_preferred_source', { showId, source });
 }
 
 export interface AuthStatus {

@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { mockTauri, sourceFixture } from './tauri-mock';
+import { mockTauri, reject, sourceFixture } from './tauri-mock';
 
 const WATCH_URL = '/watch/show-one-piece/1?dub=0';
 
@@ -48,5 +48,63 @@ test.describe('watch page — sources', () => {
 		// The media element errors on the bogus URL; the page reports it rather
 		// than silently spinning.
 		await expect(page.locator('p.error')).toBeVisible({ timeout: 15_000 });
+	});
+});
+
+test.describe('watch page — multiple sources', () => {
+	test('groups the picker by source when links come from more than one', async ({ page }) => {
+		await mockTauri(page, {
+			get_sources: [
+				sourceFixture({ source: 'allanime', quality: '1080', provider_name: 'Default' }),
+				sourceFixture({
+					source: 'hianime',
+					quality: '720',
+					provider_name: 'Megacloud',
+					url: 'http://127.0.0.1:9/hi.mp4'
+				})
+			]
+		});
+		await page.goto('/watch/allanime:show-one-piece/1?dub=0');
+
+		// Each source gets its own labelled row instead of one flat "Quality".
+		await expect(page.getByText('AllAnime', { exact: true })).toBeVisible();
+		await expect(page.getByText('HiAnime', { exact: true })).toBeVisible();
+		await expect(page.getByText('Quality', { exact: true })).toHaveCount(0);
+	});
+
+	test('a single source keeps the plain "Quality" label', async ({ page }) => {
+		await mockTauri(page, {
+			get_sources: [
+				sourceFixture({ source: 'allanime', quality: '1080' }),
+				sourceFixture({
+					source: 'allanime',
+					quality: '720',
+					url: 'http://127.0.0.1:9/b.mp4'
+				})
+			]
+		});
+		await page.goto('/watch/allanime:show-one-piece/1?dub=0');
+
+		await expect(page.getByText('Quality', { exact: true })).toBeVisible();
+	});
+
+	test('the outage banner names the source that broke', async ({ page }) => {
+		await mockTauri(page, {
+			get_sources: reject('PROVIDER_ROTATED: bootstrap rejected')
+		});
+		await page.goto('/watch/allanime:show-one-piece/1?dub=0');
+
+		await expect(page.getByTestId('provider-outage')).toBeVisible();
+		await expect(page.getByText('AllAnime changed its access scheme')).toBeVisible();
+	});
+
+	test('a pre-migration bare id falls back to generic outage copy', async ({ page }) => {
+		// No source segment in the id, so naming one would be a guess.
+		await mockTauri(page, {
+			get_sources: reject('PROVIDER_ROTATED: bootstrap rejected')
+		});
+		await page.goto('/watch/ReooPAxPMsHM4KPMY/1?dub=0');
+
+		await expect(page.getByText('Streaming source changed')).toBeVisible();
 	});
 });

@@ -251,12 +251,23 @@ pub fn set_source_enabled(
 }
 
 /// Pin which source a show plays from (the watch page's manual pick).
+///
+/// Takes the namespaced show id the user is actually looking at rather than an
+/// AniList id, because the watch page has the former and not the latter. A
+/// show with no AniList mapping yet simply has no preference to store.
 #[tauri::command]
 pub fn set_preferred_source(
     state: State<'_, AppState>,
-    anilist_id: i64,
+    show_id: String,
     source: String,
 ) -> CmdResult<()> {
+    let Some(anilist_id) = state
+        .db
+        .anilist_id_for_provider(&show_id)
+        .map_err(map_err)?
+    else {
+        return Ok(());
+    };
     state
         .db
         .set_preferred_source(anilist_id, &source)

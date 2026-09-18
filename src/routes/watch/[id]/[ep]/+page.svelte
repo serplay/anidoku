@@ -5,6 +5,7 @@
 	import Hls from 'hls.js';
 	import {
 		getSources,
+		setPreferredSource,
 		getEpisodes,
 		getWatchState,
 		setWatchState,
@@ -79,6 +80,53 @@
 
 	// Distinct qualities for the selector.
 	const qualities = $derived(sources.map((s) => s.quality));
+
+	/// Group the picker by scraping source, preserving the backend's ranking
+	/// (best-playable first) both between groups and within one. With a single
+	/// source this collapses to the old flat "Quality" row.
+	const sourceGroups = $derived.by(() => {
+		const groups: { source: string; label: string; items: VideoSource[] }[] = [];
+		for (const s of sources) {
+			const key = s.source || 'unknown';
+			let g = groups.find((x) => x.source === key);
+			if (!g) {
+				g = { source: key, label: sourceLabel(key) ?? key, items: [] };
+				groups.push(g);
+			}
+			g.items.push(s);
+		}
+		return groups;
+	});
+
+	const SOURCE_NAMES: Record<string, string> = {
+		allanime: 'AllAnime',
+		hianime: 'HiAnime',
+		animepahe: 'AnimePahe'
+	};
+
+	/// Map a source slug to its display name. An unknown slug is shown as-is;
+	/// a pre-migration bare id has no source segment, so callers get null and
+	/// fall back to generic copy rather than a made-up name.
+	function sourceLabel(slug: string): string | null {
+		if (!slug) return null;
+		return SOURCE_NAMES[slug] ?? slug;
+	}
+
+	/// Display name of the source owning a namespaced show id. A pre-migration
+	/// bare id (no ':') belongs to no named source, so the generic copy is used
+	/// rather than mistaking the whole id for a source name.
+	function sourceOf(showId: string): string | null {
+		const i = showId.indexOf(':');
+		return i > 0 ? sourceLabel(showId.slice(0, i)) : null;
+	}
+
+	/// A manual pick is also a statement of preference: remember it for this
+	/// show so the next episode starts on the same source.
+	function rememberSource(s: VideoSource) {
+		if (!s.source) return;
+		// Best-effort: an unmapped show simply has no preference to store.
+		void setPreferredSource(id, s.source).catch(() => {});
+	}
 
 	$effect(() => {
 		// Re-run only when the route changes. `load` reads other reactive state
@@ -192,7 +240,10 @@
 	function selectSource(s: VideoSource, manual = false) {
 		// A manual pick is a fresh intent: restart the fallback chain so every
 		// source is eligible again (including ones that failed earlier).
-		if (manual) attempted = new Set();
+		if (manual) {
+			attempted = new Set();
+			rememberSource(s);
+		}
 		attempted.add(s.url);
 		selected = s;
 		subtitles = s.subtitles.map((t: SubtitleTrack) => ({
@@ -437,6 +488,7 @@
 {:else if providerOutage && !selected}
 	<ProviderOutage
 		detail={providerOutage}
+		source={sourceOf(id)}
 		checking={checkingFix}
 		oncheck={() => void checkForFix()}
 		onretry={() => void load(id, ep, dub)}
@@ -487,22 +539,24 @@
 				<button class="streamlink" onclick={streamInstead}>Stream instead</button>
 			</div>
 		{/if}
-		{#if !offline && qualities.length > 1}
-			<div class="group">
-				<span class="label">Quality</span>
-				<div class="chips">
-					{#each sources as s (s.url)}
-						<button
-							class="chip"
-							class:active={selected?.url === s.url}
-							onclick={() => selectSource(s, true)}
-						>
-							{s.quality}
-							<span class="prov">{s.provider_name}</span>
-						</button>
-					{/each}
+		{#if !offline && sources.length > 1}
+			{#each sourceGroups as g (g.source)}
+				<div class="group">
+					<span class="label">{sourceGroups.length > 1 ? g.label : 'Quality'}</span>
+					<div class="chips">
+						{#each g.items as s (s.url)}
+							<button
+								class="chip"
+								class:active={selected?.url === s.url}
+								onclick={() => selectSource(s, true)}
+							>
+								{s.quality}
+								<span class="prov">{s.provider_name}</span>
+							</button>
+						{/each}
+					</div>
 				</div>
-			</div>
+			{/each}
 		{/if}
 
 		<div class="group">
