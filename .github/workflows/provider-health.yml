@@ -103,7 +103,18 @@ jobs:
             elif grep -Eiq "timed out|timeout|connection (reset|refused|closed)|dns error|error sending request|tls|HTTP status (5[0-9][0-9]|429)" "$1"; then echo transient
             else echo unknown; fi
           }
-          reason() { grep -Eo "(sources|search|episodes): [^\"]*|panicked at[^\n]*" "$1" | head -1 | cut -c1-300; }
+          # Two bugs used to make this useless. The POSIX bracket "[^\n]" means
+          # "not backslash, not the letter n" (grep is line-based, so ".*"
+          # already stops at the newline), truncating every reason at the first
+          # "n" — issue #6 reported "panicked at core/tests/alla". And a Rust
+          # panic prints its *location* on the line before its message, so
+          # "head -1" over a combined pattern always won the useless half.
+          # Prefer the assertion message; fall back to the panic location.
+          reason() {
+            r=$(grep -Eo "(sources|search|episodes): .*" "$1" | head -1)
+            [ -n "$r" ] || r=$(grep -Eo "panicked at .*" "$1" | head -1)
+            printf '%s' "$r" | cut -c1-300
+          }
 
           if [ "$BAKED" = "success" ] && { [ "$REMOTE" = "success" ] || [ "$REMOTE" = "skipped" ]; }; then
             echo "result=ok" >> "$GITHUB_OUTPUT"; echo "class=none" >> "$GITHUB_OUTPUT"; echo "reason=" >> "$GITHUB_OUTPUT"; exit 0
@@ -242,9 +253,11 @@ jobs:
           # Gates already ran in this job; land it. --auto merges once any
           # required checks pass (immediately when none are configured); fall
           # back to a direct squash if auto-merge isn't enabled on the repo.
+          # Merging is what publishes allanime-config.json to installed apps,
+          # so a merge that does not land is a failed port, not a warning.
           gh pr merge "$url" --squash --auto --delete-branch \
             || gh pr merge "$url" --squash --delete-branch \
-            || echo "::warning::could not merge $url automatically"
+            || { echo "::error::could not merge $url — the derived fix will not reach users"; exit 1; }
 
       - name: Summarise
         id: done

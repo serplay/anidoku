@@ -30,6 +30,7 @@
 import { chromium, type Page, type Request, type Response } from '@playwright/test';
 import { createHmac } from 'node:crypto';
 import { readFileSync, writeFileSync, existsSync, appendFileSync } from 'node:fs';
+import { deriveBootTemplate } from './boot-template.ts';
 
 type Sign = { keyHex: string; data: string };
 type Capture = {
@@ -227,20 +228,15 @@ function derive(cap: Capture): Config {
 		['lane', lane],
 		['referer_host', referer_host]
 	];
-	const parts = outer.data.split(':');
-	const unknown: string[] = [];
-	const tpl = parts.map((p) => {
-		const k = known.find(([, v]) => v === p);
-		if (k) return `{${k[0]}}`;
-		unknown.push(p);
-		return '{key_group}';
-	});
-	const missing = known.filter(([n]) => !tpl.includes(`{${n}}`)).map(([n]) => n);
-	if (unknown.length !== 1 || missing.length) {
-		fail(2, `signature "${outer.data}" does not fit <known fields + one key_group> (unknown=${JSON.stringify(unknown)}, missing=${JSON.stringify(missing)})`);
+	// Separator and field order both rotate — infer them (see boot-template.ts).
+	let key_group: string, boot_sig_template: string;
+	try {
+		const t = deriveBootTemplate(outer.data, known);
+		({ key_group, template: boot_sig_template } = t);
+		log(`boot signature template: ${boot_sig_template} (separator ${JSON.stringify(t.separator)})`);
+	} catch (e) {
+		fail(2, e instanceof Error ? e.message : String(e));
 	}
-	const key_group = unknown[0];
-	const boot_sig_template = tpl.join(':');
 
 	// Key derivation cross-check (warn-only: the show page may not import the
 	// episode key before we stop capturing).

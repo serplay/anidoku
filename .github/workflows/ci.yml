@@ -87,6 +87,11 @@ jobs:
       - run: npm ci
       - name: Parse derive.ts (no network)
         run: node --experimental-strip-types --no-warnings --check scripts/allanime-oracle/derive.ts
+      # Syntax-checking derive.ts cannot catch a logic bug in the signature
+      # tokeniser, and one such bug (a hard-coded ':' separator) cost a 4.5-day
+      # streaming outage. Run its unit tests over recorded signatures.
+      - name: Oracle unit tests (signature tokeniser)
+        run: npm run test:oracle
       - name: allanime-config.json ↔ constants.rs lockstep
         run: |
           npm run -s oracle:apply

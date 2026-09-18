@@ -14,7 +14,8 @@
 		"test:e2e:ui": "playwright test --ui",
 		"tauri": "tauri",
 		"oracle": "node --experimental-strip-types --no-warnings scripts/allanime-oracle/derive.ts",
-		"oracle:apply": "node scripts/allanime-oracle/apply-constants.mjs"
+		"oracle:apply": "node scripts/allanime-oracle/apply-constants.mjs",
+		"test:oracle": "node --test --experimental-strip-types --no-warnings scripts/allanime-oracle/*.test.ts"
 	},
 	"dependencies": {
 		"@fontsource/ibm-plex-sans": "^5.2.5",
