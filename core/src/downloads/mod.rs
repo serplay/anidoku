@@ -17,7 +17,7 @@ pub mod hls;
 
 use crate::db::Database;
 use crate::models::{DownloadRow, DownloadState, StreamKind, SubtitleTrack, VideoSource};
-use crate::provider::{allanime::playability_rank, Provider};
+use crate::provider::{playability_rank, Provider};
 use crate::proxy::ProxyClient;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};

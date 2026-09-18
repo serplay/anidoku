@@ -12,7 +12,7 @@ use anidoku_core::db::Database;
 use anidoku_core::downloads::{DownloadEvent, DownloadManager};
 use anidoku_core::media_server;
 use anidoku_core::models::{AnimeSummary, DownloadState, StreamKind, TranslationType, VideoSource};
-use anidoku_core::provider::Provider;
+use anidoku_core::provider::{Capabilities, Provider};
 use anidoku_core::proxy::ProxyClient;
 use anidoku_core::Result;
 use async_trait::async_trait;
@@ -26,8 +26,18 @@ struct StubProvider;
 
 #[async_trait]
 impl Provider for StubProvider {
-    fn name(&self) -> &'static str {
+    fn id(&self) -> &'static str {
         "stub-hls"
+    }
+    fn display_name(&self) -> &'static str {
+        "Stub HLS"
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            dub: false,
+            carries_anilist_id: false,
+            subtitles: false,
+        }
     }
     async fn search(&self, _q: &str, _m: TranslationType) -> Result<Vec<AnimeSummary>> {
         Ok(vec![])
