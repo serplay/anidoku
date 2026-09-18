@@ -10,7 +10,7 @@ use anidoku_core::models::{
     HomeSections, LibraryItem, ListEntry, MediaInfo, MediaListStatus, MediaOverview, MediaTag,
     Notification, StreamKind, TranslationType, VideoSource, Viewer, WatchState,
 };
-use anidoku_core::provider::Provider;
+use anidoku_core::provider::{aggregate, SourceStatus};
 use anidoku_core::sync::{best_match, best_provider_match};
 use serde::Serialize;
 use std::time::Duration;
@@ -50,7 +50,9 @@ pub async fn search_anime(
     } else {
         TranslationType::Sub
     };
-    let results = state.provider.search(&query, mode).await.map_err(map_err)?;
+    // Aggregated across every enabled source; a broken source is skipped
+    // rather than failing the search.
+    let results = aggregate::search_all(&state.sources, &state.db, &query, mode).await;
     // Warm the metadata cache so detail pages can render offline.
     for r in &results {
         let _ = state.db.cache_anime(
@@ -75,9 +77,7 @@ pub async fn get_episodes(
     } else {
         TranslationType::Sub
     };
-    state
-        .provider
-        .episodes(&show_id, mode)
+    aggregate::episodes(&state.sources, &show_id, mode)
         .await
         .map_err(map_err)
 }
@@ -94,9 +94,7 @@ pub async fn get_sources(
     } else {
         TranslationType::Sub
     };
-    state
-        .provider
-        .sources(&show_id, &episode, mode)
+    aggregate::sources_for(&state.sources, &state.db, &show_id, &episode, mode)
         .await
         .map_err(map_err)
 }
@@ -193,38 +191,106 @@ pub struct Settings {
     pub client_id: Option<String>,
     /// The exact redirect URL the user must register on their AniList client.
     pub redirect_url: String,
-    /// Streaming provider's current build id (rotates with allanime).
-    pub provider_build_id: String,
-    /// `"baked"` or `"remote"` — whether the self-heal config has been applied.
-    pub provider_config_source: String,
+    /// One row per registered source: build id, config origin, and whether the
+    /// user has it enabled.
+    pub sources: Vec<SourceSetting>,
+}
+
+/// A source as Settings shows it.
+#[derive(Serialize)]
+pub struct SourceSetting {
+    #[serde(flatten)]
+    pub status: SourceStatus,
+    pub enabled: bool,
 }
 
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> CmdResult<Settings> {
-    let status = state.provider.status();
+    let enabled = state.sources.enabled_ordered(&state.db);
+    // Ordered as the user sees them: enabled sources in failover order, then
+    // the disabled ones.
+    let mut rows: Vec<SourceSetting> = enabled
+        .iter()
+        .map(|p| SourceSetting {
+            status: p.status(),
+            enabled: true,
+        })
+        .collect();
+    for p in state.sources.all() {
+        if !enabled.iter().any(|e| e.id() == p.id()) {
+            rows.push(SourceSetting {
+                status: p.status(),
+                enabled: false,
+            });
+        }
+    }
     Ok(Settings {
         client_id: state.auth.client_id(),
         redirect_url: auth::REDIRECT_URL.to_string(),
-        provider_build_id: status.build_id,
-        provider_config_source: status.config_source.to_string(),
+        sources: rows,
     })
+}
+
+/// Reorder the failover chain (ids best-first).
+#[tauri::command]
+pub fn set_source_order(state: State<'_, AppState>, order: Vec<String>) -> CmdResult<()> {
+    state.sources.set_order(&state.db, &order).map_err(map_err)
+}
+
+/// Enable or disable one source.
+#[tauri::command]
+pub fn set_source_enabled(
+    state: State<'_, AppState>,
+    source: String,
+    enabled: bool,
+) -> CmdResult<()> {
+    state
+        .sources
+        .set_enabled(&state.db, &source, enabled)
+        .map_err(map_err)
+}
+
+/// Pin which source a show plays from (the watch page's manual pick).
+#[tauri::command]
+pub fn set_preferred_source(
+    state: State<'_, AppState>,
+    anilist_id: i64,
+    source: String,
+) -> CmdResult<()> {
+    state
+        .db
+        .set_preferred_source(anilist_id, &source)
+        .map_err(map_err)
 }
 
 #[derive(Serialize)]
 pub struct ProviderRefresh {
-    /// True when a newer remote config was fetched and applied.
+    /// True when a newer remote config was fetched and applied for any source.
     pub changed: bool,
     pub build_id: String,
     pub config_source: String,
 }
 
-/// Force-fetch the provider's remote config (the "Check for fix" button when
-/// the provider has rotated and the user doesn't want to wait for the next
-/// automatic self-heal attempt).
+/// Force-fetch remote config (the "Check for fix" button when a source has
+/// rotated and the user doesn't want to wait for the next automatic self-heal).
+/// With no `source`, every registered source is refreshed.
 #[tauri::command]
-pub async fn refresh_provider_config(state: State<'_, AppState>) -> CmdResult<ProviderRefresh> {
-    let changed = state.provider.refresh_config(true).await;
-    let status = state.provider.status();
+pub async fn refresh_provider_config(
+    state: State<'_, AppState>,
+    source: Option<String>,
+) -> CmdResult<ProviderRefresh> {
+    let targets: Vec<_> = match &source {
+        Some(id) => state.sources.get(id).into_iter().collect(),
+        None => state.sources.all().to_vec(),
+    };
+    let mut changed = false;
+    for p in &targets {
+        changed |= p.refresh_config(true).await;
+    }
+    let status = targets
+        .first()
+        .map(|p| p.status())
+        .unwrap_or_else(|| SourceStatus::r#static("", ""));
     Ok(ProviderRefresh {
         changed,
         build_id: status.build_id,
@@ -844,11 +910,8 @@ pub async fn resolve_provider_for_anilist(
 
     // 2. Provider title search, matched by carried aniListId (else title
     //    similarity). Persist the discovered mapping for next time.
-    let results = state
-        .provider
-        .search(&title, TranslationType::Sub)
-        .await
-        .map_err(map_err)?;
+    let results =
+        aggregate::search_all(&state.sources, &state.db, &title, TranslationType::Sub).await;
     for r in &results {
         let _ = state.db.cache_anime(
             &r.provider_id,
@@ -884,7 +947,7 @@ pub async fn check_availability(
 ) -> CmdResult<bool> {
     // 1. An existing provider mapping means it's streamable — permanent yes.
     if let Ok(Some(_)) = state.db.provider_id_for_anilist(anilist_id) {
-        let _ = state.db.set_availability(anilist_id, true);
+        mark_available(&state, anilist_id, true);
         return Ok(true);
     }
 
@@ -897,11 +960,8 @@ pub async fn check_availability(
 
     // 3. Reverse-resolve against the provider (no navigation). Persist the
     //    discovered mapping so a later click is instant, then cache the outcome.
-    let results = state
-        .provider
-        .search(&title, TranslationType::Sub)
-        .await
-        .map_err(map_err)?;
+    let results =
+        aggregate::search_all(&state.sources, &state.db, &title, TranslationType::Sub).await;
     for r in &results {
         let _ = state.db.cache_anime(
             &r.provider_id,
@@ -918,8 +978,19 @@ pub async fn check_availability(
         }
         None => false,
     };
-    let _ = state.db.set_availability(anilist_id, available);
+    mark_available(&state, anilist_id, available);
     Ok(available)
+}
+
+/// Record an availability outcome for every enabled source.
+///
+/// The check itself is aggregated (it searches all sources at once), so the
+/// answer applies to all of them: writing one row per source keeps the cache
+/// keyed the way the schema expects while preserving "any source has it" reads.
+fn mark_available(state: &State<'_, AppState>, anilist_id: i64, available: bool) {
+    for p in state.sources.enabled_ordered(&state.db) {
+        let _ = state.db.set_availability(anilist_id, p.id(), available);
+    }
 }
 
 /// Inbox: fired episode notifications, newest first.

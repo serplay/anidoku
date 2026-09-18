@@ -30,10 +30,12 @@ jobs:
           workspaces: . -> target
       - name: rustfmt
         run: cargo fmt --all -- --check
+      # Workspace-wide: src-tauri was only ever cargo check'd, so its lints
+      # were unenforced and its tests never ran.
       - name: clippy (deny warnings)
-        run: cargo clippy -p anidoku-core --all-targets -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
-        run: cargo test -p anidoku-core
+        run: cargo test --workspace
 
   # The Svelte/TypeScript frontend: type + template checks.
   frontend:

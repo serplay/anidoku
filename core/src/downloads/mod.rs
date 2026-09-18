@@ -17,7 +17,7 @@ pub mod hls;
 
 use crate::db::Database;
 use crate::models::{DownloadRow, DownloadState, StreamKind, SubtitleTrack, VideoSource};
-use crate::provider::{playability_rank, Provider};
+use crate::provider::{aggregate, playability_rank, Registry};
 use crate::proxy::ProxyClient;
 use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
@@ -283,7 +283,7 @@ pub enum DownloadEvent {
 pub struct DownloadManager {
     db: Arc<Database>,
     proxy: Arc<ProxyClient>,
-    provider: Arc<dyn Provider>,
+    sources: Arc<Registry>,
     root: PathBuf,
     events: mpsc::UnboundedSender<DownloadEvent>,
     /// Control flags for active jobs (pause/cancel requests).
@@ -301,14 +301,14 @@ impl DownloadManager {
     pub fn new(
         db: Arc<Database>,
         proxy: Arc<ProxyClient>,
-        provider: Arc<dyn Provider>,
+        sources: Arc<Registry>,
         root: PathBuf,
         events: mpsc::UnboundedSender<DownloadEvent>,
     ) -> Arc<Self> {
         Arc::new(Self {
             db,
             proxy,
-            provider,
+            sources,
             root,
             events,
             controls: Mutex::new(HashMap::new()),
@@ -538,11 +538,17 @@ impl DownloadManager {
         };
         let desired = row.quality.as_deref().unwrap_or("best");
 
-        // Source URLs expire, so every (re)start re-resolves via the provider.
-        let sources = self
-            .provider
-            .sources(&row.anime_id, &row.episode_number, mode)
-            .await?;
+        // Source URLs expire, so every (re)start re-resolves. Going through
+        // the dispatch layer means a job whose source rotated mid-queue can
+        // still finish from another source mapped to the same show.
+        let sources = aggregate::sources_for(
+            &self.sources,
+            &self.db,
+            &row.anime_id,
+            &row.episode_number,
+            mode,
+        )
+        .await?;
         let source = pick_source(&sources, desired)
             .ok_or_else(|| Error::Download("no downloadable source found".into()))?
             .clone();

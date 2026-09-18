@@ -12,7 +12,7 @@ use anidoku_core::db::Database;
 use anidoku_core::downloads::{DownloadEvent, DownloadManager};
 use anidoku_core::media_server;
 use anidoku_core::models::{AnimeSummary, DownloadState, StreamKind, TranslationType, VideoSource};
-use anidoku_core::provider::{Capabilities, Provider};
+use anidoku_core::provider::{Capabilities, Provider, Registry};
 use anidoku_core::proxy::ProxyClient;
 use anidoku_core::Result;
 use async_trait::async_trait;
@@ -86,7 +86,7 @@ async fn main() {
     let mgr = DownloadManager::new(
         db.clone(),
         proxy.clone(),
-        Arc::new(StubProvider),
+        Arc::new(Registry::new(vec![Arc::new(StubProvider)])),
         root.clone(),
         tx,
     );
