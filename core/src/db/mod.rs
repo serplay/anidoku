@@ -5,6 +5,7 @@ use crate::models::{
     AiringRow, ContinueWatchingItem, LibraryItem, ListEntry, MediaListStatus, Notification,
     WatchState,
 };
+use crate::provider::SourceId;
 use crate::sync::QueuedMutation;
 use crate::Result;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -122,17 +123,21 @@ impl Database {
         cover_url: Option<&str>,
         episode_count: Option<u32>,
     ) -> Result<()> {
+        // `source` is denormalised from the id so queries can filter by source
+        // without parsing every row. A legacy bare id resolves to allanime,
+        // which is the only source that could have written one.
+        let source = SourceId::parse(provider_id).source;
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO anime (provider_id, title_romaji, title_english, cover_url, episode_count, cached_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())
+            "INSERT INTO anime (provider_id, source, title_romaji, title_english, cover_url, episode_count, cached_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, unixepoch())
              ON CONFLICT(provider_id) DO UPDATE SET
                title_romaji = excluded.title_romaji,
                title_english = COALESCE(excluded.title_english, anime.title_english),
                cover_url = COALESCE(excluded.cover_url, anime.cover_url),
                episode_count = COALESCE(excluded.episode_count, anime.episode_count),
                cached_at = excluded.cached_at",
-            params![provider_id, title_romaji, title_english, cover_url, episode_count],
+            params![provider_id, source, title_romaji, title_english, cover_url, episode_count],
         )?;
         Ok(())
     }
@@ -151,29 +156,38 @@ impl Database {
 
     // ---- provider <-> anilist mapping ----
 
-    /// Best-effort link of a provider show to an AniList id. Ignores the UNIQUE
-    /// violation that arises if the same AniList id is already mapped elsewhere
-    /// (we never want to abort a search/caching pass over this).
+    /// Best-effort link of a provider show to an AniList id.
+    ///
+    /// One AniList show may now map to one show per source, so this writes
+    /// `anime_sources` (and mirrors onto `anime.anilist_id`, which stays as a
+    /// denormalised join convenience). The first source to map a show becomes
+    /// the preferred one; a later source is recorded without stealing that.
+    /// Never fails a search/caching pass over a mapping conflict.
     pub fn link_provider_anilist(&self, provider_id: &str, anilist_id: i64) -> Result<()> {
+        let source = SourceId::parse(provider_id).source;
         let conn = self.conn.lock().unwrap();
-        let res = conn.execute(
+        // Another show from the SAME source already claims this AniList id:
+        // keep the existing mapping rather than flip-flopping between two
+        // fuzzy title matches.
+        conn.execute(
+            "INSERT INTO anime_sources (anilist_id, source, provider_id, preferred)
+             VALUES (?1, ?2, ?3,
+                     NOT EXISTS (SELECT 1 FROM anime_sources WHERE anilist_id = ?1 AND preferred = 1))
+             ON CONFLICT(anilist_id, source) DO NOTHING",
+            params![anilist_id, source, provider_id],
+        )?;
+        conn.execute(
             "UPDATE anime SET anilist_id = ?2 WHERE provider_id = ?1 AND anilist_id IS NULL",
             params![provider_id, anilist_id],
-        );
-        match res {
-            Ok(_) => Ok(()),
-            // 2067 = SQLITE_CONSTRAINT_UNIQUE. Leave the row unmapped rather
-            // than error out.
-            Err(rusqlite::Error::SqliteFailure(e, _)) if e.extended_code == 2067 => Ok(()),
-            Err(e) => Err(e.into()),
-        }
+        )?;
+        Ok(())
     }
 
     pub fn anilist_id_for_provider(&self, provider_id: &str) -> Result<Option<i64>> {
         let conn = self.conn.lock().unwrap();
         let row = conn
             .query_row(
-                "SELECT anilist_id FROM anime WHERE provider_id = ?1",
+                "SELECT anilist_id FROM anime_sources WHERE provider_id = ?1",
                 params![provider_id],
                 |r| r.get::<_, Option<i64>>(0),
             )
@@ -181,11 +195,15 @@ impl Database {
         Ok(row.flatten())
     }
 
+    /// The show id to use for an AniList title: the preferred source's, else
+    /// the first one linked. Callers that deep-link (home cards, inbox,
+    /// Continue Watching) keep working unchanged.
     pub fn provider_id_for_anilist(&self, anilist_id: i64) -> Result<Option<String>> {
         let conn = self.conn.lock().unwrap();
         let row = conn
             .query_row(
-                "SELECT provider_id FROM anime WHERE anilist_id = ?1",
+                "SELECT provider_id FROM anime_sources WHERE anilist_id = ?1
+                 ORDER BY preferred DESC, linked_at ASC LIMIT 1",
                 params![anilist_id],
                 |r| r.get(0),
             )
@@ -193,15 +211,52 @@ impl Database {
         Ok(row)
     }
 
-    // ---- availability (streamable-source cache, keyed by anilist_id) ----
+    /// Every source that can play this AniList show, preferred first.
+    pub fn sources_for_anilist(&self, anilist_id: i64) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT source, provider_id FROM anime_sources WHERE anilist_id = ?1
+             ORDER BY preferred DESC, linked_at ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![anilist_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
 
-    /// Cached availability outcome as `(available, checked_at)`, or `None` when
-    /// the title has never been checked.
+    /// Pin the source to use for a show (the watch page's manual pick). A
+    /// source with no mapping for this show is ignored rather than clearing
+    /// the existing preference.
+    pub fn set_preferred_source(&self, anilist_id: i64, source: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM anime_sources WHERE anilist_id = ?1 AND source = ?2)",
+            params![anilist_id, source],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Ok(());
+        }
+        conn.execute(
+            "UPDATE anime_sources SET preferred = (source = ?2) WHERE anilist_id = ?1",
+            params![anilist_id, source],
+        )?;
+        Ok(())
+    }
+
+    // ---- availability (streamable-source cache, per (anilist_id, source)) ----
+
+    /// Cached availability for one title, aggregated across sources: a title is
+    /// available if *any* source has it, so one source's "no" must not
+    /// de-emphasise a title another source can play. Returns the outcome and
+    /// the timestamp that backs it (the newest positive, else the newest
+    /// negative), or `None` when no source has ever checked.
     pub fn get_availability(&self, anilist_id: i64) -> Result<Option<(bool, i64)>> {
         let conn = self.conn.lock().unwrap();
         let row = conn
             .query_row(
-                "SELECT available, checked_at FROM availability WHERE anilist_id = ?1",
+                "SELECT available, checked_at FROM availability WHERE anilist_id = ?1
+                 ORDER BY available DESC, checked_at DESC LIMIT 1",
                 params![anilist_id],
                 |r| Ok((r.get::<_, i64>(0)? != 0, r.get::<_, i64>(1)?)),
             )
@@ -209,16 +264,34 @@ impl Database {
         Ok(row)
     }
 
-    /// Record an availability outcome, stamped now.
-    pub fn set_availability(&self, anilist_id: i64, available: bool) -> Result<()> {
+    /// Cached availability for one title at one source.
+    pub fn get_availability_for(
+        &self,
+        anilist_id: i64,
+        source: &str,
+    ) -> Result<Option<(bool, i64)>> {
+        let conn = self.conn.lock().unwrap();
+        let row = conn
+            .query_row(
+                "SELECT available, checked_at FROM availability
+                 WHERE anilist_id = ?1 AND source = ?2",
+                params![anilist_id, source],
+                |r| Ok((r.get::<_, i64>(0)? != 0, r.get::<_, i64>(1)?)),
+            )
+            .optional()?;
+        Ok(row)
+    }
+
+    /// Record one source's availability outcome, stamped now.
+    pub fn set_availability(&self, anilist_id: i64, source: &str, available: bool) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO availability (anilist_id, available, checked_at)
-             VALUES (?1, ?2, unixepoch())
-             ON CONFLICT(anilist_id) DO UPDATE SET
+            "INSERT INTO availability (anilist_id, source, available, checked_at)
+             VALUES (?1, ?2, ?3, unixepoch())
+             ON CONFLICT(anilist_id, source) DO UPDATE SET
                available  = excluded.available,
                checked_at = excluded.checked_at",
-            params![anilist_id, available as i64],
+            params![anilist_id, source, available as i64],
         )?;
         Ok(())
     }
@@ -971,18 +1044,113 @@ mod tests {
     }
 
     #[test]
-    fn link_provider_anilist_ignores_unique_conflict() {
+    fn one_source_cannot_map_two_shows_to_the_same_anilist_id() {
+        // Two fuzzy title matches within a source must not flip-flop: the
+        // first mapping wins and the second is dropped, never an error.
         let db = Database::open_in_memory().unwrap();
-        db.cache_anime("provA", "A", None, None, None).unwrap();
-        db.cache_anime("provB", "B", None, None, None).unwrap();
-        db.link_provider_anilist("provA", 42).unwrap();
-        // provB claiming the same anilist_id must not error (best-effort).
-        db.link_provider_anilist("provB", 42).unwrap();
+        db.cache_anime("allanime:provA", "A", None, None, None)
+            .unwrap();
+        db.cache_anime("allanime:provB", "B", None, None, None)
+            .unwrap();
+        db.link_provider_anilist("allanime:provA", 42).unwrap();
+        db.link_provider_anilist("allanime:provB", 42).unwrap();
         assert_eq!(
             db.provider_id_for_anilist(42).unwrap().as_deref(),
-            Some("provA")
+            Some("allanime:provA")
         );
-        assert_eq!(db.anilist_id_for_provider("provB").unwrap(), None);
+        assert_eq!(db.anilist_id_for_provider("allanime:provB").unwrap(), None);
+    }
+
+    #[test]
+    fn a_show_maps_to_one_id_per_source_preferred_first() {
+        let db = Database::open_in_memory().unwrap();
+        db.cache_anime("allanime:a1", "One Piece", None, None, None)
+            .unwrap();
+        db.cache_anime("hianime:h1", "One Piece", None, None, None)
+            .unwrap();
+        db.link_provider_anilist("allanime:a1", 21).unwrap();
+        db.link_provider_anilist("hianime:h1", 21).unwrap();
+
+        assert_eq!(
+            db.sources_for_anilist(21).unwrap(),
+            vec![
+                ("allanime".to_string(), "allanime:a1".to_string()),
+                ("hianime".to_string(), "hianime:h1".to_string()),
+            ]
+        );
+        // The first to map stays preferred; a later source doesn't steal it.
+        assert_eq!(
+            db.provider_id_for_anilist(21).unwrap().as_deref(),
+            Some("allanime:a1")
+        );
+        // Both directions resolve.
+        assert_eq!(db.anilist_id_for_provider("hianime:h1").unwrap(), Some(21));
+    }
+
+    #[test]
+    fn pinning_a_source_changes_which_id_deep_links_resolve_to() {
+        let db = Database::open_in_memory().unwrap();
+        db.cache_anime("allanime:a1", "One Piece", None, None, None)
+            .unwrap();
+        db.cache_anime("hianime:h1", "One Piece", None, None, None)
+            .unwrap();
+        db.link_provider_anilist("allanime:a1", 21).unwrap();
+        db.link_provider_anilist("hianime:h1", 21).unwrap();
+
+        db.set_preferred_source(21, "hianime").unwrap();
+        assert_eq!(
+            db.provider_id_for_anilist(21).unwrap().as_deref(),
+            Some("hianime:h1")
+        );
+        // Exactly one source is preferred at a time.
+        assert_eq!(
+            db.sources_for_anilist(21).unwrap()[0].0,
+            "hianime".to_string()
+        );
+
+        // Pinning a source with no mapping is a no-op, not a wipe.
+        db.set_preferred_source(21, "animepahe").unwrap();
+        assert_eq!(
+            db.provider_id_for_anilist(21).unwrap().as_deref(),
+            Some("hianime:h1")
+        );
+    }
+
+    #[test]
+    fn a_legacy_bare_id_still_resolves_after_namespacing() {
+        // cache_anime derives `source` from the id, so a bare id behaves
+        // exactly as it did before migration 007.
+        let db = Database::open_in_memory().unwrap();
+        db.cache_anime("ReooPAxPMsHM4KPMY", "One Piece", None, None, None)
+            .unwrap();
+        db.link_provider_anilist("ReooPAxPMsHM4KPMY", 21).unwrap();
+        assert_eq!(
+            db.anilist_id_for_provider("ReooPAxPMsHM4KPMY").unwrap(),
+            Some(21)
+        );
+        assert_eq!(db.sources_for_anilist(21).unwrap()[0].0, "allanime");
+    }
+
+    #[test]
+    fn availability_is_per_source_and_any_yes_wins() {
+        let db = Database::open_in_memory().unwrap();
+        assert!(db.get_availability(21).unwrap().is_none());
+
+        db.set_availability(21, "allanime", false).unwrap();
+        assert_eq!(
+            db.get_availability(21).unwrap().map(|(a, _)| a),
+            Some(false)
+        );
+
+        // One source having it must not leave the title de-emphasised.
+        db.set_availability(21, "hianime", true).unwrap();
+        assert_eq!(db.get_availability(21).unwrap().map(|(a, _)| a), Some(true));
+        assert_eq!(
+            db.get_availability_for(21, "allanime")
+                .unwrap()
+                .map(|(a, _)| a),
+            Some(false)
+        );
     }
 
     #[test]
