@@ -54,6 +54,14 @@ pub enum StreamKind {
 /// A single resolved, directly-playable video link.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoSource {
+    /// Which scraping source produced this link ("allanime", "hianime", ...).
+    /// Stamped by the dispatch layer, so a scraper may leave it empty.
+    ///
+    /// Note the naming: this is the *source*, while `provider_name` below is
+    /// the upstream CDN host. The two are different axes and both predate the
+    /// other, hence the awkward pair.
+    #[serde(default)]
+    pub source: String,
     /// Human name of the upstream host ("wixmp", "sharepoint", ...).
     pub provider_name: String,
     /// Quality label, e.g. "1080", "720", "hls-multi".

@@ -1,3 +1,4 @@
+pub mod aggregate;
 pub mod allanime;
 pub mod id;
 pub mod rank;

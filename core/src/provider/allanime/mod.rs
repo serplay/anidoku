@@ -568,6 +568,7 @@ impl AllAnime {
                 crate::models::StreamKind::Mp4
             };
             return Ok(vec![VideoSource {
+                source: String::new(),
                 provider_name: r.name,
                 quality: "auto".into(),
                 url: r.url,
@@ -621,6 +622,7 @@ impl AllAnime {
         Ok(find_player_src(&body)
             .map(|src| {
                 vec![VideoSource {
+                    source: String::new(),
                     provider_name: name.to_string(),
                     quality: "auto".into(),
                     url: src.to_string(),
@@ -720,6 +722,7 @@ fn parse_okru_metadata(body: &str, name: &str) -> Vec<VideoSource> {
                 .and_then(Value::as_str)
                 .map_or_else(|| "auto".to_string(), okru_quality);
             out.push(VideoSource {
+                source: String::new(),
                 provider_name: name.to_string(),
                 quality,
                 url: normalize_scheme(url),
@@ -732,6 +735,7 @@ fn parse_okru_metadata(body: &str, name: &str) -> Vec<VideoSource> {
     for key in ["hlsManifestUrl", "hlsMasterPlaylistUrl", "ondemandHls"] {
         if let Some(u) = v.get(key).and_then(Value::as_str).filter(|u| !u.is_empty()) {
             out.push(VideoSource {
+                source: String::new(),
                 provider_name: name.to_string(),
                 quality: "auto".into(),
                 url: normalize_scheme(u),

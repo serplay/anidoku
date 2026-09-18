@@ -47,6 +47,7 @@ impl Provider for StubProvider {
     }
     async fn sources(&self, _s: &str, _e: &str, _m: TranslationType) -> Result<Vec<VideoSource>> {
         Ok(vec![VideoSource {
+            source: String::new(),
             provider_name: "mux-test".into(),
             quality: "hls-multi".into(),
             url: HLS_URL.into(),

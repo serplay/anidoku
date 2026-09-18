@@ -990,6 +990,7 @@ mod tests {
 
     fn src(name: &str, quality: &str, url: &str, kind: crate::models::StreamKind) -> VideoSource {
         VideoSource {
+            source: String::new(),
             provider_name: name.into(),
             quality: quality.into(),
             url: url.into(),

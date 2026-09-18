@@ -52,6 +52,7 @@ mod tests {
 
     fn src(url: &str, kind: StreamKind) -> VideoSource {
         VideoSource {
+            source: String::new(),
             provider_name: "t".into(),
             quality: "auto".into(),
             url: url.into(),

@@ -227,6 +227,7 @@ pub fn parse_clock_links(
             .unwrap_or_default();
 
         out.push(VideoSource {
+            source: String::new(),
             provider_name: provider_name.to_string(),
             quality,
             url: url.to_string(),
