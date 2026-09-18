@@ -1,5 +1,122 @@
 # Plan
 
+## M6 — Multi-source (2026-09-18, in progress)
+
+Motivation: on 2026-09-14 allanime rotated its `x-aa-boot` scheme and the app
+was a brick for 4.5 days (issue #6). One source is a single point of failure,
+and ARCHITECTURE.md always listed "provider failover UX" as v1 polish. This
+milestone cashes that in.
+
+Decisions taken with the user: fix the outage first; ship HiAnime + AnimePahe
+alongside allanime; both automatic failover and a manual picker; migrate
+existing user data in place (keep downloads, watch progress, library).
+
+### Done
+
+- **Outage fixed (PR #7).** The rotation oracle tokenised the outer signature
+  with a hard-coded `split(':')`; allanime moved to a `+`-joined signature with
+  a reordered field list, so every known field landed in `missing[]` and the
+  auto-port aborted before opening a PR. `scripts/allanime-oracle/boot-template.ts`
+  now infers the separator (any character in the signature but in no known field
+  value, then a fallback list) and derives the template from wherever the fields
+  land. buildId 174 ported; live test green (6 sources). Unit-tested over the
+  real 166/174 captures and wired into the `oracle-smoke` CI job, which
+  previously only syntax-checked `derive.ts`.
+
+  Also fixed three things that let the outage stay invisible: the health
+  workflow's `reason()` regex (`[^\n]` in a POSIX bracket means "not backslash,
+  not the letter n"), a failed `gh pr merge` only emitting a `::warning::`, and
+  the live test panicking with a file:line instead of a readable message.
+
+- **Source framework.** `Provider` gained `id()`/`display_name()`/
+  `capabilities()` plus defaulted `status()`/`refresh_config()`, so the app
+  holds `Arc<dyn Provider>` instead of a concrete scraper. New:
+  `provider::registry` (ordered lookup, order + disabled set in `app_settings`),
+  `provider::id::SourceId` (`"<source>:<show_id>"`, colon-free ids read as
+  legacy allanime), `provider::rank` (playability ranking, never was
+  allanime-specific).
+
+- **Schema (migration 007).** Ids namespaced across `anime`/`episodes`/
+  `downloads`/`watch_state`; `anime.anilist_id UNIQUE` replaced by an
+  `anime_sources` table (one row per source, one preferred); `availability`
+  keyed `(anilist_id, source)` and read as "any source has it".
+  `downloads.dir_path` deliberately untouched — it names real directories, so
+  rewriting it would orphan every completed download. 8 tests over a database
+  built at the pre-007 schema prove data survives, including schema parity
+  between a fresh and a migrated database.
+
+- **Dispatch + failover** (`provider::aggregate`). Parallel search across
+  enabled sources, interleaved by source rank rather than concatenated; ids
+  namespaced on the way out and stripped on the way in; `VideoSource.source`
+  stamped by the dispatch layer, not trusted from a scraper. `sources_for`
+  tries the source the user is on, then falls across to every sibling mapped to
+  the same AniList show in parallel, preserving the original error when nothing
+  resolves anywhere (the outage UI keys off it). The download engine dispatches
+  the same way, so a job whose source rotates mid-queue can finish elsewhere.
+  15 tests.
+
+- **UI.** Settings lists every source with enable/reorder and per-source config
+  status (refusing to disable the last one). The watch page groups the picker
+  by source, collapsing to the old flat "Quality" row for a single source; a
+  manual pick pins that source for the show. The outage banner names the source
+  that broke. 18 e2e tests.
+
+- **CI** now runs clippy and tests over the workspace — `src-tauri` was only
+  ever `cargo check`ed, so its lints went unenforced and its 5 tests never ran.
+
+### Blocked: the two concrete scrapers
+
+The framework is complete and allanime runs through it unchanged, but neither
+target source can be scraped by a plain HTTP client as of 2026-09-18:
+
+- **AnimePahe** — `animepahe.ru` now redirects to `animepahe.su` and serves a
+  JS challenge page instead of `GET /api?m=search`. The challenge sets a cookie
+  that a normal `reqwest` request cannot obtain.
+- **HiAnime** — `hianime.to` does not complete a TLS handshake for a plain
+  client at all (Cloudflare bot management rejects the fingerprint); the
+  mirrors redirect to it.
+
+This is an architectural decision, not a porting task, and it needs a call
+before either scraper is worth writing:
+
+1. **Browser-assisted bootstrap** — solve the challenge in a hidden webview at
+   startup and hand the cookie to the Rust client. Works on desktop and mobile
+   (both have a webview), mirrors how the allanime oracle already drives a real
+   client, but adds a startup cost and a platform-specific shim.
+2. **TLS-fingerprint impersonation** — swap `reqwest` for a client that mimics
+   a browser's ClientHello. Least UI cost, but an arms race, and it changes the
+   HTTP stack every source shares.
+3. **Different sources** — pick ones without active bot management. Cheaper to
+   port, likely shorter-lived.
+
+Whatever is chosen, each new source inherits the allanime ops shape: its own
+`<source>-config.json` remote override, an oracle, and a matrix entry in the
+health workflow.
+
+### Remaining
+
+1. Decide the anti-bot approach above, then port the two scrapers (each with
+   fixture-based parse tests and an `#[ignore]`d live test).
+2. Matrix `provider-health.yml` over sources: one issue per source, "all
+   sources down" as the P0 versus "one source down" as a warning.
+3. Escalate `needs-human` beyond a GitHub label — the pipeline sat red 4.5 days
+   unnoticed, which is the failure mode it was built to prevent.
+4. De-duplicate the rotation-signature list, currently in three places
+   (`allanime/mod.rs`, `src/lib/api.ts`, `provider-health.yml`).
+5. `Error::ProviderRotated` as a real variant instead of the `ROTATED_PREFIX`
+   string hack.
+6. Startup `.expect()`s in `src-tauri/src/lib.rs` (open DB, create downloads
+   dir, bind media server) crash with no UI; port-in-use and read-only-FS are
+   realistic.
+
+### Known gaps (unchanged, recorded)
+
+- ASS/SSA subtitles are not parsed (`core/src/subs.rs:73`); the dominant fansub
+  format degrades to "unsupported".
+- `src-tauri/gen/apple/anidoku.xcodeproj/project.pbxproj` has an uncommitted
+  change removing `libapp.a` from the Resources build phase — decide whether it
+  is a real fix or regeneration drift.
+
 ## M5 — iOS (2026-07-16)
 
 Scaffolded and **simulator-verified** (iPhone 16 Pro, iOS 26.5); build recipe
