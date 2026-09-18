@@ -40,9 +40,20 @@ export async function mockTauri(page: Page, commands: CommandResponses = {}): Pr
 			get_settings: {
 				client_id: null,
 				redirect_url: 'http://127.0.0.1:8737/callback',
-				provider_build_id: '166',
-				provider_config_source: 'baked'
+				sources: [
+					{
+						source: 'allanime',
+						display_name: 'AllAnime',
+						build_id: '174',
+						config_source: 'baked',
+						config_url: '',
+						enabled: true
+					}
+				]
 			},
+			set_source_enabled: null,
+			set_source_order: null,
+			set_preferred_source: null,
 			refresh_provider_config: { changed: false, build_id: '166', config_source: 'baked' },
 			get_watch_state: null,
 			list_watch_states: [],
