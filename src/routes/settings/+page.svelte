@@ -235,9 +235,9 @@
 	<h2>Streaming sources</h2>
 	<p class="hint">
 		Episodes are looked up across every source you leave on, top to bottom — if one is down or
-		missing an episode, the next is used automatically. Sources rotate their access scheme every
-		few weeks; a fix is published automatically and picked up on the next play attempt, but you
-		can fetch it right away.
+		missing an episode, the next is used automatically. A source that shows a build number
+		rotates its access scheme every few weeks; a fix is published automatically and picked up on
+		the next play attempt, but you can fetch it right away.
 	</p>
 	<ul class="sources" data-testid="source-list">
 		{#each settings?.sources ?? [] as s, i (s.source)}

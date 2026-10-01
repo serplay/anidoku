@@ -119,19 +119,58 @@ test.describe('settings — streaming provider', () => {
 			get_settings: {
 				client_id: null,
 				redirect_url: 'x',
-				sources: [{ source: 'allanime', display_name: 'AllAnime', build_id: '174', config_source: 'remote', config_url: '', enabled: true }, { source: 'hianime', display_name: 'HiAnime', build_id: '3', config_source: 'baked', config_url: '', enabled: true }, { source: 'animepahe', display_name: 'AnimePahe', build_id: '', config_source: 'static', config_url: '', enabled: false }]
+				sources: [{ source: 'allanime', display_name: 'AllAnime', build_id: '174', config_source: 'remote', config_url: '', enabled: true }, { source: 'anizone', display_name: 'AniZone', build_id: '', config_source: 'static', config_url: '', enabled: true }, { source: 'animegg', display_name: 'AnimeGG', build_id: '', config_source: 'static', config_url: '', enabled: false }]
 			}
 		});
 		await page.goto('/settings');
 
 		const rows = page.getByTestId('source-list').locator('li');
 		await expect(rows).toHaveCount(3);
-		await expect(page.getByTestId('source-animepahe').locator('input')).not.toBeChecked();
+		await expect(page.getByTestId('source-animegg').locator('input')).not.toBeChecked();
 		// A source with nothing volatile says so rather than showing a blank build.
-		await expect(page.getByTestId('source-animepahe')).toContainText('no rotating config');
+		await expect(page.getByTestId('source-animegg')).toContainText('no rotating config');
 		// The first source cannot move up, the last cannot move down.
 		await expect(page.getByRole('button', { name: 'Move AllAnime up' })).toBeDisabled();
-		await expect(page.getByRole('button', { name: 'Move AnimePahe down' })).toBeDisabled();
+		await expect(page.getByRole('button', { name: 'Move AnimeGG down' })).toBeDisabled();
+	});
+
+	test('ships three independent sources, all on by default', async ({ page }) => {
+		// The mock's default settings mirror what the app registers.
+		await mockTauri(page);
+		await page.goto('/settings');
+
+		const rows = page.getByTestId('source-list').locator('li');
+		await expect(rows).toHaveCount(3);
+		for (const slug of ['allanime', 'anizone', 'animegg']) {
+			await expect(page.getByTestId(`source-${slug}`).locator('input')).toBeChecked();
+		}
+	});
+
+	test('turning one source off leaves the others on and is persisted', async ({ page }) => {
+		await mockTauri(page);
+		await page.goto('/settings');
+		await page.getByTestId('source-allanime').locator('input').uncheck();
+
+		await expect(page.getByText('At least one source has to stay on')).toHaveCount(0);
+		const call = await page.evaluate(() =>
+			(
+				window as unknown as { __IPC_CALLS__: { cmd: string; args: unknown }[] }
+			).__IPC_CALLS__.find((c) => c.cmd === 'set_source_enabled')
+		);
+		expect(call?.args).toEqual({ source: 'allanime', enabled: false });
+	});
+
+	test('moving a source down reorders the failover chain', async ({ page }) => {
+		await mockTauri(page);
+		await page.goto('/settings');
+		await page.getByRole('button', { name: 'Move AllAnime down' }).click();
+
+		const call = await page.evaluate(() =>
+			(
+				window as unknown as { __IPC_CALLS__: { cmd: string; args: unknown }[] }
+			).__IPC_CALLS__.find((c) => c.cmd === 'set_source_order')
+		);
+		expect(call?.args).toEqual({ order: ['anizone', 'allanime', 'animegg'] });
 	});
 
 	test('refuses to turn off the last remaining source', async ({ page }) => {

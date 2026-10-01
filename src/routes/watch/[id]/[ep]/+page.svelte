@@ -36,7 +36,7 @@
 	let video = $state<HTMLVideoElement>();
 	let sources = $state<VideoSource[]>([]);
 	let selected = $state<VideoSource | null>(null);
-	let subtitles = $state<{ label: string; lang: string; src: string }[]>([]);
+	let subtitles = $state<{ label: string; lang: string; src: string; default: boolean }[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	// Distinct from `error`: the provider answered fine, this episode just has no
@@ -100,9 +100,22 @@
 
 	const SOURCE_NAMES: Record<string, string> = {
 		allanime: 'AllAnime',
-		hianime: 'HiAnime',
-		animepahe: 'AnimePahe'
+		anizone: 'AniZone',
+		animegg: 'AnimeGG'
 	};
+
+	/// Set when the links on screen come from a different source than the one
+	/// this show was opened from — i.e. that source failed or lacks the episode
+	/// and the backend fell across. Worth saying out loud: quality and
+	/// subtitles can differ, and it explains why a pinned source isn't in use.
+	const failover = $derived.by(() => {
+		const i = id.indexOf(':');
+		if (offline || i <= 0 || sources.length === 0) return null;
+		const owner = id.slice(0, i);
+		if (sources.some((s) => !s.source || s.source === owner)) return null;
+		const used = [...new Set(sources.map((s) => sourceLabel(s.source) ?? s.source))];
+		return { from: sourceLabel(owner) ?? owner, to: used.join(', ') };
+	});
 
 	/// Map a source slug to its display name. An unknown slug is shown as-is;
 	/// a pre-migration bare id has no source segment, so callers get null and
@@ -180,7 +193,8 @@
 					subtitles = info.subtitles.map((t) => ({
 						label: t.label,
 						lang: t.lang,
-						src: offlineUrl(base, info.dir, t.file)
+						src: offlineUrl(base, info.dir, t.file),
+						default: t.default ?? false
 					}));
 					queueMicrotask(() =>
 						attachMedia(info.kind, offlineUrl(base, info.dir, info.video))
@@ -249,7 +263,8 @@
 		subtitles = s.subtitles.map((t: SubtitleTrack) => ({
 			label: t.label,
 			lang: t.lang,
-			src: mediaUrl(base, t.url, s.referer)
+			src: mediaUrl(base, t.url, s.referer),
+			default: t.default ?? false
 		}));
 		// Wait for the <video> to exist, then attach.
 		queueMicrotask(() =>
@@ -430,7 +445,7 @@
 		}
 	}
 
-	// External subtitle file: convert (SRT/VTT) in Rust, attach as a blob track.
+	// External subtitle file: convert (SRT/ASS/VTT) in Rust, attach as a blob track.
 	let extInput = $state<HTMLInputElement>();
 	async function onExternalSub(e: Event) {
 		const file = (e.target as HTMLInputElement).files?.[0];
@@ -511,7 +526,13 @@
 			onerror={onVideoError}
 		>
 			{#each subtitles as sub (sub.src)}
-				<track kind="subtitles" label={sub.label} srclang={sub.lang} src={sub.src} />
+				<track
+					kind="subtitles"
+					label={sub.label}
+					srclang={sub.lang}
+					src={sub.src}
+					default={sub.default}
+				/>
 			{/each}
 		</video>
 	</div>
@@ -539,6 +560,12 @@
 				<button class="streamlink" onclick={streamInstead}>Stream instead</button>
 			</div>
 		{/if}
+		{#if failover}
+			<p class="failover" data-testid="failover-note" role="status">
+				{failover.from} isn't available for this episode right now — playing from {failover.to}
+				instead.
+			</p>
+		{/if}
 		{#if !offline && sources.length > 1}
 			{#each sourceGroups as g (g.source)}
 				<div class="group">
@@ -564,7 +591,7 @@
 			<input
 				bind:this={extInput}
 				type="file"
-				accept=".srt,.vtt"
+				accept=".srt,.vtt,.ass,.ssa"
 				style="display:none"
 				onchange={onExternalSub}
 			/>
@@ -666,6 +693,12 @@
 	.hint {
 		font: var(--text-caption);
 		color: var(--color-muted);
+	}
+	.failover {
+		flex-basis: 100%;
+		margin: 0;
+		font: var(--text-body-md);
+		color: var(--color-muted-strong);
 	}
 	.row {
 		display: flex;

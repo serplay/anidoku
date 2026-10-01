@@ -44,8 +44,24 @@ export async function mockTauri(page: Page, commands: CommandResponses = {}): Pr
 					{
 						source: 'allanime',
 						display_name: 'AllAnime',
-						build_id: '174',
+						build_id: '177',
 						config_source: 'baked',
+						config_url: '',
+						enabled: true
+					},
+					{
+						source: 'anizone',
+						display_name: 'AniZone',
+						build_id: '',
+						config_source: 'static',
+						config_url: '',
+						enabled: true
+					},
+					{
+						source: 'animegg',
+						display_name: 'AnimeGG',
+						build_id: '',
+						config_source: 'static',
 						config_url: '',
 						enabled: true
 					}

@@ -20,6 +20,8 @@ export interface SubtitleTrack {
 	label: string;
 	lang: string;
 	url: string;
+	/** The track to show without being asked (sources with no burned-in subs). */
+	default?: boolean;
 }
 
 export interface VideoSource {
@@ -544,6 +546,7 @@ export interface OfflineSubtitle {
 	label: string;
 	lang: string;
 	file: string;
+	default?: boolean;
 }
 
 export interface OfflineInfo {
