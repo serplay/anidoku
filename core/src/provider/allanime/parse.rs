@@ -220,6 +220,7 @@ pub fn parse_clock_links(
                                 .to_string(),
                             lang: lang.to_string(),
                             url: url.to_string(),
+                            default: false,
                         })
                     })
                     .collect()

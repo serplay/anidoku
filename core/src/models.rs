@@ -79,6 +79,11 @@ pub struct SubtitleTrack {
     pub label: String,
     pub lang: String,
     pub url: String,
+    /// The track the source itself would show by default. Only set by sources
+    /// whose video has no burned-in subtitles; the player turns it on so a
+    /// raw-audio stream doesn't start with no text at all.
+    #[serde(default)]
+    pub default: bool,
 }
 
 impl StreamKind {

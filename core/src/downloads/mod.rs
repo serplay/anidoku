@@ -234,6 +234,10 @@ pub struct ManifestSub {
     pub label: String,
     pub lang: String,
     pub file: String,
+    /// Mirrors [`SubtitleTrack::default`]; absent in manifests written before
+    /// it existed.
+    #[serde(default)]
+    pub default: bool,
 }
 
 /// Read the completion manifest for an episode dir (relative to `root`).
@@ -745,12 +749,26 @@ impl DownloadManager {
         let mut base_url = source.url.clone();
         let mut quality_label = source.quality.clone();
 
+        // A demuxed master keeps audio in a separate rendition; downloading
+        // only the variant would produce a silent file, so the matching audio
+        // playlist is fetched alongside it.
+        let mut demuxed: Option<(hls::Variant, hls::AudioRendition, String)> = None;
         let variants = hls::parse_variants(&playlist, &base_url);
         if !variants.is_empty() {
             let v = hls::pick_variant(&variants, desired)
-                .ok_or_else(|| Error::Download("empty master playlist".into()))?;
+                .ok_or_else(|| Error::Download("empty master playlist".into()))?
+                .clone();
             if v.height > 0 {
                 quality_label = v.height.to_string();
+            }
+            if let Some(group) = &v.audio_group {
+                let renditions = hls::parse_audio_renditions(&playlist, &base_url);
+                let language = row.dub.then_some("en");
+                if let Some(audio) = hls::pick_audio(&renditions, group, language) {
+                    let af = self.proxy.fetch(&audio.url, referer).await?;
+                    let text = String::from_utf8_lossy(&af.bytes).into_owned();
+                    demuxed = Some((v.clone(), audio.clone(), text));
+                }
             }
             base_url = v.url.clone();
             let vf = self.proxy.fetch(&base_url, referer).await?;
@@ -759,12 +777,28 @@ impl DownloadManager {
         self.db
             .set_download_meta(row.id, dir_rel, StreamKind::Hls, &quality_label)?;
 
-        let segments = hls::parse_segments(&playlist, &base_url);
-        if segments.is_empty() {
+        // One track for a muxed stream, two (video + audio) for a demuxed
+        // one. Their segments are downloaded as a single ordered list so the
+        // existing contiguous-count checkpoint covers both.
+        let mut tracks = vec![HlsTrack::new(playlist, base_url, "seg", "key")];
+        if let Some((_, audio, text)) = &demuxed {
+            tracks.push(HlsTrack::new(
+                text.clone(),
+                audio.url.clone(),
+                "aud",
+                "akey",
+            ));
+        }
+        if tracks.iter().any(|t| t.segments.is_empty()) {
             return Err(Error::Download("HLS playlist has no segments".into()));
         }
-        let keys = hls::parse_uri_attrs(&playlist, &base_url);
-        let total = segments.len() as i64;
+        // (track index, segment index) in download order.
+        let order: Vec<(usize, usize)> = tracks
+            .iter()
+            .enumerate()
+            .flat_map(|(t, track)| (0..track.segments.len()).map(move |i| (t, i)))
+            .collect();
+        let total = order.len() as i64;
 
         // Resume checkpoint: valid only if the segment count still matches
         // (a re-resolve can land on a different variant/host).
@@ -774,21 +808,12 @@ impl DownloadManager {
         }
         let mut bytes_done = if done > 0 { row.bytes_done } else { 0 };
 
-        // Local names for playlist localization.
-        let mut map: HashMap<String, String> = HashMap::new();
-        for (i, url) in segments.iter().enumerate() {
-            map.entry(url.clone())
-                .or_insert_with(|| format!("seg_{i:05}.{}", seg_ext(url)));
-        }
-        for (i, url) in keys.iter().enumerate() {
-            map.entry(url.clone())
-                .or_insert_with(|| format!("key_{i:02}.bin"));
-        }
-
         // Keys/init sections are small: always (re)download them.
-        for url in &keys {
-            let data = self.fetch_with_retry(url, referer, flag).await?;
-            tokio::fs::write(dir.join(&map[url]), &data).await?;
+        for track in &tracks {
+            for url in &track.keys {
+                let data = self.fetch_with_retry(url, referer, flag).await?;
+                tokio::fs::write(dir.join(&track.map[url]), &data).await?;
+            }
         }
 
         tracker.set(bytes_done, None, done, Some(total));
@@ -802,27 +827,38 @@ impl DownloadManager {
                 _ => {}
             }
             let end = (done as usize + SEGMENT_CONCURRENCY).min(total as usize);
-            let batch: Vec<usize> = (done as usize..end).collect();
-            let fetches = batch.iter().map(|&i| {
-                let url = segments[i].clone();
+            let fetches = order[done as usize..end].iter().map(|&(t, i)| {
+                let url = tracks[t].segments[i].clone();
                 async move {
                     let data = self.fetch_with_retry(&url, referer, flag).await?;
-                    Ok::<(usize, Vec<u8>), Error>((i, data))
+                    Ok::<(usize, usize, Vec<u8>), Error>((t, i, data))
                 }
             });
             let results = futures_util::future::join_all(fetches).await;
             for res in results {
-                let (i, data) = res?;
+                let (t, i, data) = res?;
                 bytes_done += data.len() as i64;
-                tokio::fs::write(dir.join(&map[&segments[i]]), &data).await?;
+                let track = &tracks[t];
+                tokio::fs::write(dir.join(&track.map[&track.segments[i]]), &data).await?;
             }
             done = end as i64;
             tracker.set(bytes_done, None, done, Some(total));
         }
 
-        // All segments on disk: write the localized playlist.
-        let local = hls::localize_playlist(&playlist, &base_url, &map);
-        tokio::fs::write(dir.join("index.m3u8"), local).await?;
+        // All segments on disk: write the localized playlist(s). The entry
+        // point is always index.m3u8 — the media playlist itself when muxed,
+        // a small master pointing at video.m3u8 + audio.m3u8 when demuxed.
+        match &demuxed {
+            None => {
+                tokio::fs::write(dir.join("index.m3u8"), tracks[0].localized()).await?;
+            }
+            Some((variant, audio, _)) => {
+                tokio::fs::write(dir.join("video.m3u8"), tracks[0].localized()).await?;
+                tokio::fs::write(dir.join("audio.m3u8"), tracks[1].localized()).await?;
+                let master = hls::local_master(variant, audio, "video.m3u8", "audio.m3u8");
+                tokio::fs::write(dir.join("index.m3u8"), master).await?;
+            }
+        }
         tracker.set(bytes_done, Some(bytes_done), total, Some(total));
         tracker.persist_now();
         Ok((JobOutcome::Done, quality_label))
@@ -863,13 +899,8 @@ impl DownloadManager {
             let vtt = if text.trim_start().starts_with("WEBVTT") {
                 text.into_owned()
             } else {
-                let ext = sub
-                    .url
-                    .split(['?', '#'])
-                    .next()
-                    .and_then(|p| p.rsplit('.').next())
-                    .unwrap_or("srt");
-                match crate::subs::to_vtt(&text, ext) {
+                let ext = crate::subs::url_extension(&sub.url).unwrap_or_else(|| "srt".into());
+                match crate::subs::to_vtt(&text, &ext) {
                     Ok(v) => v,
                     Err(_) => continue,
                 }
@@ -880,10 +911,51 @@ impl DownloadManager {
                     label: sub.label.clone(),
                     lang: sub.lang.clone(),
                     file,
+                    default: sub.default,
                 });
             }
         }
         out
+    }
+}
+
+/// One media playlist of an HLS download (the video, or its separate audio)
+/// with the local filenames its segments and keys are saved under.
+struct HlsTrack {
+    playlist: String,
+    base_url: String,
+    segments: Vec<String>,
+    keys: Vec<String>,
+    /// Absolute upstream URL -> local filename.
+    map: HashMap<String, String>,
+}
+
+impl HlsTrack {
+    /// `seg_prefix` / `key_prefix` keep two tracks' files apart in one dir.
+    fn new(playlist: String, base_url: String, seg_prefix: &str, key_prefix: &str) -> Self {
+        let segments = hls::parse_segments(&playlist, &base_url);
+        let keys = hls::parse_uri_attrs(&playlist, &base_url);
+        let mut map: HashMap<String, String> = HashMap::new();
+        for (i, url) in segments.iter().enumerate() {
+            map.entry(url.clone())
+                .or_insert_with(|| format!("{seg_prefix}_{i:05}.{}", seg_ext(url)));
+        }
+        for (i, url) in keys.iter().enumerate() {
+            map.entry(url.clone())
+                .or_insert_with(|| format!("{key_prefix}_{i:02}.bin"));
+        }
+        Self {
+            playlist,
+            base_url,
+            segments,
+            keys,
+            map,
+        }
+    }
+
+    /// The playlist rewritten to reference the local filenames.
+    fn localized(&self) -> String {
+        hls::localize_playlist(&self.playlist, &self.base_url, &self.map)
     }
 }
 
@@ -1087,6 +1159,7 @@ mod tests {
                 label: "English".into(),
                 lang: "en".into(),
                 file: "sub_00_en.vtt".into(),
+                default: false,
             }],
         };
         std::fs::write(
@@ -1141,6 +1214,36 @@ mod tests {
             assert!(w[1] <= BACKOFF_CAP, "backoff must never exceed the cap");
         }
         assert_eq!(*seq.last().unwrap(), BACKOFF_CAP);
+    }
+
+    #[test]
+    fn hls_tracks_keep_video_and_audio_files_apart() {
+        let media = "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:6,\ns0.ts\n#EXTINF:6,\ns1.ts\n#EXT-X-ENDLIST\n";
+        let video = HlsTrack::new(
+            media.to_string(),
+            "https://cdn.x/video/1080/playlist.m3u8".into(),
+            "seg",
+            "key",
+        );
+        let audio = HlsTrack::new(
+            media.to_string(),
+            "https://cdn.x/audio/ja/playlist.m3u8".into(),
+            "aud",
+            "akey",
+        );
+        assert_eq!(video.segments.len(), 2);
+        // Same relative names upstream, distinct files on disk.
+        let v = video.localized();
+        let a = audio.localized();
+        assert!(
+            v.contains("seg_00000.ts") && v.contains("URI=\"key_00.bin\""),
+            "{v}"
+        );
+        assert!(
+            a.contains("aud_00001.ts") && a.contains("URI=\"akey_00.bin\""),
+            "{a}"
+        );
+        assert!(!a.contains("seg_") && !v.contains("https://"));
     }
 
     #[tokio::test]

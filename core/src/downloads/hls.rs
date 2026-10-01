@@ -12,6 +12,19 @@ pub struct Variant {
     pub bandwidth: u64,
     /// Vertical resolution from RESOLUTION=WxH, 0 when absent.
     pub height: u32,
+    /// `AUDIO="…"` group, when the variant's audio lives in a separate
+    /// rendition (demuxed HLS) rather than inside its own segments.
+    pub audio_group: Option<String>,
+}
+
+/// One `#EXT-X-MEDIA:TYPE=AUDIO` rendition that has its own playlist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AudioRendition {
+    pub group: String,
+    pub name: String,
+    pub language: String,
+    pub default: bool,
+    pub url: String,
 }
 
 /// Parse `#EXT-X-STREAM-INF` variants out of a master playlist. Returns an
@@ -19,7 +32,7 @@ pub struct Variant {
 /// media playlist).
 pub fn parse_variants(playlist: &str, base_url: &str) -> Vec<Variant> {
     let mut out = Vec::new();
-    let mut pending: Option<(u64, u32)> = None;
+    let mut pending: Option<(u64, u32, Option<String>)> = None;
     for line in playlist.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -36,17 +49,79 @@ pub fn parse_variants(playlist: &str, base_url: &str) -> Vec<Variant> {
                 .and_then(|v| v.split(['x', 'X']).nth(1))
                 .and_then(|h| h.trim().parse::<u32>().ok())
                 .unwrap_or(0);
-            pending = Some((bandwidth, height));
+            pending = Some((bandwidth, height, attrs.get("AUDIO").cloned()));
         } else if !line.starts_with('#') {
-            if let Some((bandwidth, height)) = pending.take() {
+            if let Some((bandwidth, height, audio_group)) = pending.take() {
                 out.push(Variant {
                     url: resolve_url(base_url, line),
                     bandwidth,
                     height,
+                    audio_group,
                 });
             }
         }
     }
+    out
+}
+
+/// Audio renditions of a master playlist that carry their own playlist. A
+/// rendition without a `URI` is muxed into the variant and needs nothing extra.
+pub fn parse_audio_renditions(playlist: &str, base_url: &str) -> Vec<AudioRendition> {
+    playlist
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("#EXT-X-MEDIA:"))
+        .map(parse_attrs)
+        .filter(|a| a.get("TYPE").map(String::as_str) == Some("AUDIO"))
+        .filter_map(|a| {
+            Some(AudioRendition {
+                url: resolve_url(base_url, a.get("URI")?),
+                group: a.get("GROUP-ID").cloned().unwrap_or_default(),
+                name: a.get("NAME").cloned().unwrap_or_default(),
+                language: a.get("LANGUAGE").cloned().unwrap_or_default(),
+                default: a.get("DEFAULT").map(String::as_str) == Some("YES"),
+            })
+        })
+        .collect()
+}
+
+/// The audio rendition to keep for an offline copy: within the variant's
+/// group, a `preferred_language` match if asked for and present, else the one
+/// the stream marks as default, else the first.
+pub fn pick_audio<'a>(
+    renditions: &'a [AudioRendition],
+    group: &str,
+    preferred_language: Option<&str>,
+) -> Option<&'a AudioRendition> {
+    let in_group: Vec<&AudioRendition> = renditions.iter().filter(|r| r.group == group).collect();
+    preferred_language
+        .and_then(|lang| {
+            in_group
+                .iter()
+                .find(|r| r.language.to_ascii_lowercase().starts_with(lang))
+        })
+        .or_else(|| in_group.iter().find(|r| r.default))
+        .or_else(|| in_group.first())
+        .copied()
+}
+
+/// A local master playlist tying a downloaded video playlist to its separately
+/// downloaded audio playlist (both localized, sitting next to it).
+pub fn local_master(
+    variant: &Variant,
+    audio: &AudioRendition,
+    video: &str,
+    audio_file: &str,
+) -> String {
+    let mut out = String::from("#EXTM3U\n#EXT-X-VERSION:3\n");
+    out.push_str(&format!(
+        "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"{}\",LANGUAGE=\"{}\",DEFAULT=YES,AUTOSELECT=YES,URI=\"{audio_file}\"\n",
+        audio.name.replace('"', ""),
+        audio.language.replace('"', ""),
+    ));
+    out.push_str(&format!(
+        "#EXT-X-STREAM-INF:BANDWIDTH={},AUDIO=\"audio\"\n{video}\n",
+        variant.bandwidth.max(1)
+    ));
     out
 }
 
@@ -250,14 +325,86 @@ sub/seg2.ts\n\
                 url: "a".into(),
                 bandwidth: 100,
                 height: 0,
+                audio_group: None,
             },
             Variant {
                 url: "b".into(),
                 bandwidth: 900,
                 height: 0,
+                audio_group: None,
             },
         ];
         assert_eq!(pick_variant(&v, "best").unwrap().url, "b");
         assert_eq!(pick_variant(&v, "720").unwrap().url, "b");
+    }
+
+    /// Shape of a real demuxed master (AniZone): audio in its own renditions.
+    const DEMUXED: &str = "#EXTM3U\n\
+#EXT-X-VERSION:3\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"group_audio\",NAME=\"English (US)\",DEFAULT=NO,LANGUAGE=\"en\",CHANNELS=\"2\",URI=\"audio/2_en/playlist.m3u8\"\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"group_audio\",NAME=\"Japanese\",DEFAULT=YES,LANGUAGE=\"ja\",CHANNELS=\"2\",URI=\"audio/3_ja/playlist.m3u8\"\n\
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"English\",URI=\"subs/en.m3u8\"\n\
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"muxed\",NAME=\"In-band\",DEFAULT=YES\n\
+#EXT-X-STREAM-INF:BANDWIDTH=3476000,RESOLUTION=1920x1080,CODECS=\"avc1.640032,mp4a.40.2\",AUDIO=\"group_audio\"\n\
+video/1080/playlist.m3u8\n";
+
+    #[test]
+    fn variants_carry_their_audio_group() {
+        let v = parse_variants(DEMUXED, "https://cdn.x/a/master.m3u8");
+        assert_eq!(v[0].audio_group.as_deref(), Some("group_audio"));
+        // A muxed master has none.
+        let muxed = parse_variants(MASTER, "https://cdn.x/a/master.m3u8");
+        assert!(muxed.iter().all(|v| v.audio_group.is_none()));
+    }
+
+    #[test]
+    fn audio_renditions_are_the_ones_with_their_own_playlist() {
+        let a = parse_audio_renditions(DEMUXED, "https://cdn.x/a/master.m3u8");
+        // Subtitles and the URI-less in-band rendition are not downloads.
+        assert_eq!(a.len(), 2);
+        assert_eq!(a[1].name, "Japanese");
+        assert_eq!(a[1].url, "https://cdn.x/a/audio/3_ja/playlist.m3u8");
+        assert!(a[1].default && !a[0].default);
+        assert!(parse_audio_renditions(MASTER, "https://cdn.x/m.m3u8").is_empty());
+    }
+
+    #[test]
+    fn pick_audio_prefers_language_then_default_then_first() {
+        let a = parse_audio_renditions(DEMUXED, "https://cdn.x/a/master.m3u8");
+        assert_eq!(pick_audio(&a, "group_audio", None).unwrap().language, "ja");
+        assert_eq!(
+            pick_audio(&a, "group_audio", Some("en")).unwrap().language,
+            "en"
+        );
+        // Asked-for language missing: fall back to the default, not nothing.
+        assert_eq!(
+            pick_audio(&a, "group_audio", Some("fr")).unwrap().language,
+            "ja"
+        );
+        assert!(pick_audio(&a, "other_group", None).is_none());
+        let mut no_default = a.clone();
+        no_default[1].default = false;
+        assert_eq!(
+            pick_audio(&no_default, "group_audio", None)
+                .unwrap()
+                .language,
+            "en"
+        );
+    }
+
+    #[test]
+    fn local_master_links_video_to_its_audio() {
+        let v = &parse_variants(DEMUXED, "https://cdn.x/a/master.m3u8")[0];
+        let a = parse_audio_renditions(DEMUXED, "https://cdn.x/a/master.m3u8");
+        let m = local_master(v, &a[1], "video.m3u8", "audio.m3u8");
+        // Round-trips through our own parsers as a demuxed master.
+        let back = parse_variants(&m, "http://127.0.0.1:1/dl/show/1/index.m3u8");
+        assert_eq!(back[0].url, "http://127.0.0.1:1/dl/show/1/video.m3u8");
+        let audio = parse_audio_renditions(&m, "http://127.0.0.1:1/dl/show/1/index.m3u8");
+        assert_eq!(audio[0].url, "http://127.0.0.1:1/dl/show/1/audio.m3u8");
+        assert_eq!(
+            pick_audio(&audio, back[0].audio_group.as_deref().unwrap(), None),
+            Some(&audio[0])
+        );
     }
 }
