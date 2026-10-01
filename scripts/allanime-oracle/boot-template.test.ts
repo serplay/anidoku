@@ -32,6 +32,15 @@ test('buildId 173 — plus-joined, key_group fourth (the outage)', () => {
 	assert.equal(t.template, '{lane}+{epoch}+{referer_host}+{key_group}+{build_id}');
 });
 
+test('buildId 177 — slash-joined, key_group first again (2026-10-01)', () => {
+	// The rotation after the outage: a third separator and a fifth order,
+	// derived with no code change — the point of inferring both.
+	const t = deriveBootTemplate('mkissa/k7/mkissa.to/177/2960', KNOWN('177', '2960'));
+	assert.equal(t.separator, '/');
+	assert.equal(t.key_group, 'mkissa');
+	assert.equal(t.template, '{key_group}/{lane}/{referer_host}/{build_id}/{epoch}');
+});
+
 test('a separator never seen before is inferred, not guessed from a list', () => {
 	const t = deriveBootTemplate('k7§2960§mkissa.to§mkissa§174', KNOWN('174', '2960'));
 	assert.equal(t.separator, '§');
