@@ -9,6 +9,8 @@
 		getNotifyPlanning,
 		setNotifyPlanning,
 		refreshProviderConfig,
+		setSourceEnabled,
+		setSourceOrder,
 		isDesktop,
 		type Settings
 	} from '$lib/api';
@@ -31,13 +33,44 @@
 			settings = await getSettings();
 			pushToast(
 				r.changed
-					? `Provider config updated (build ${r.build_id}).`
-					: `Provider config is current (build ${r.build_id}).`
+					? `Source config updated (build ${r.build_id}).`
+					: 'Every source is already on its latest published config.'
 			);
 		} catch (e) {
 			pushToast(e instanceof Error ? e.message : String(e));
 		} finally {
 			providerChecking = false;
+		}
+	}
+
+	async function toggleSource(source: string, enabled: boolean) {
+		// Disabling the last enabled source would leave nothing to play from.
+		const enabledCount = (settings?.sources ?? []).filter((s) => s.enabled).length;
+		if (!enabled && enabledCount <= 1) {
+			pushToast('At least one source has to stay on — nothing could play otherwise.');
+			return;
+		}
+		try {
+			await setSourceEnabled(source, enabled);
+			settings = await getSettings();
+		} catch (e) {
+			pushToast(e instanceof Error ? e.message : String(e));
+		}
+	}
+
+	/// Move a source up or down the failover chain. Order is sent as the full
+	/// list so the backend never has to reconstruct intent from a delta.
+	async function move(source: string, delta: -1 | 1) {
+		const ids = (settings?.sources ?? []).map((s) => s.source);
+		const i = ids.indexOf(source);
+		const j = i + delta;
+		if (i < 0 || j < 0 || j >= ids.length) return;
+		[ids[i], ids[j]] = [ids[j], ids[i]];
+		try {
+			await setSourceOrder(ids);
+			settings = await getSettings();
+		} catch (e) {
+			pushToast(e instanceof Error ? e.message : String(e));
 		}
 	}
 
@@ -199,16 +232,50 @@
 </section>
 
 <section class="card provider" data-testid="provider-card">
-	<h2>Streaming provider</h2>
+	<h2>Streaming sources</h2>
 	<p class="hint">
-		The video provider rotates its access scheme every few weeks. A fix is published automatically
-		and picked up on the next play attempt; use this to fetch it right away.
+		Episodes are looked up across every source you leave on, top to bottom — if one is down or
+		missing an episode, the next is used automatically. A source that shows a build number
+		rotates its access scheme every few weeks; a fix is published automatically and picked up on
+		the next play attempt, but you can fetch it right away.
 	</p>
+	<ul class="sources" data-testid="source-list">
+		{#each settings?.sources ?? [] as s, i (s.source)}
+			<li class="source-row" class:off={!s.enabled} data-testid="source-{s.source}">
+				<label class="toggle">
+					<input
+						type="checkbox"
+						checked={s.enabled}
+						onchange={(e) => toggleSource(s.source, e.currentTarget.checked)}
+					/>
+					<span class="name">{s.display_name}</span>
+				</label>
+				<span class="meta">
+					{#if s.config_source === 'static'}
+						no rotating config
+					{:else}
+						build <strong data-testid="provider-build">{s.build_id || '—'}</strong>
+						· config <strong data-testid="provider-source">{s.config_source}</strong>
+					{/if}
+				</span>
+				<span class="reorder">
+					<button
+						type="button"
+						aria-label="Move {s.display_name} up"
+						disabled={i === 0}
+						onclick={() => move(s.source, -1)}>↑</button
+					>
+					<button
+						type="button"
+						aria-label="Move {s.display_name} down"
+						disabled={i === (settings?.sources.length ?? 0) - 1}
+						onclick={() => move(s.source, 1)}>↓</button
+					>
+				</span>
+			</li>
+		{/each}
+	</ul>
 	<div class="provider-row">
-		<span>
-			Build <strong data-testid="provider-build">{settings?.provider_build_id ?? '—'}</strong>
-			· config <strong data-testid="provider-source">{settings?.provider_config_source ?? '—'}</strong>
-		</span>
 		<Button variant="secondary" onclick={checkProvider} disabled={providerChecking}>
 			{providerChecking ? 'Checking…' : 'Check for provider update'}
 		</Button>
@@ -392,5 +459,75 @@
 		justify-content: space-between;
 		gap: var(--space-md);
 		flex-wrap: wrap;
+	}
+
+	.sources {
+		list-style: none;
+		margin: var(--space-md) 0;
+		padding: 0;
+		display: flex;
+		flex-direction: column;
+		gap: var(--space-xs);
+	}
+	.source-row {
+		display: flex;
+		align-items: center;
+		gap: var(--space-md);
+		padding: var(--space-sm) var(--space-md);
+		background: var(--color-surface-raised, rgba(255, 255, 255, 0.03));
+		border: 1px solid var(--color-hairline);
+		border-radius: var(--radius-md, 6px);
+	}
+	.source-row.off {
+		opacity: 0.55;
+	}
+	.source-row .toggle {
+		display: flex;
+		align-items: center;
+		gap: var(--space-sm);
+		margin: 0;
+		cursor: pointer;
+	}
+	.source-row .name {
+		font-weight: 600;
+	}
+	.source-row .meta {
+		margin-left: auto;
+		font-size: var(--font-size-sm, 0.85rem);
+		color: var(--color-text-muted);
+		white-space: nowrap;
+	}
+	.reorder {
+		display: flex;
+		gap: 2px;
+	}
+	.reorder button {
+		width: 26px;
+		height: 26px;
+		line-height: 1;
+		background: transparent;
+		color: var(--color-text-muted);
+		border: 1px solid var(--color-hairline);
+		border-radius: var(--radius-sm, 4px);
+		cursor: pointer;
+	}
+	.reorder button:disabled {
+		opacity: 0.35;
+		cursor: default;
+	}
+
+	/* The meta column is the first thing to go when there's no room. */
+	@media (max-width: 560px) {
+		.source-row {
+			flex-wrap: wrap;
+		}
+		.source-row .meta {
+			margin-left: 0;
+			width: 100%;
+			order: 3;
+		}
+		.reorder {
+			margin-left: auto;
+		}
 	}
 </style>

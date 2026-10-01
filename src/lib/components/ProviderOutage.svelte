@@ -4,12 +4,14 @@
 	interface Props {
 		/** Raw backend error, kept for bug reports. */
 		detail: string;
+		/** Display name of the source that broke, when it is known. */
+		source?: string | null;
 		checking?: boolean;
 		oncheck: () => void;
 		onretry: () => void;
 	}
 
-	let { detail, checking = false, oncheck, onretry }: Props = $props();
+	let { detail, source = null, checking = false, oncheck, onretry }: Props = $props();
 </script>
 
 <div class="outage" data-testid="provider-outage" role="alert">
@@ -23,10 +25,12 @@
 			stroke-linejoin="round"
 		/>
 	</svg>
-	<p class="title">Streaming source changed</p>
+	<p class="title">{source ? `${source} changed its access scheme` : 'Streaming source changed'}</p>
 	<p class="sub">
-		The video provider updated its access scheme, so this build can't fetch streams right now.
-		A fix is published automatically once detected — check for it now, or try again later.
+		{source ? `${source} updated how it hands out streams` : "The video provider updated its access scheme"},
+		so this build can't fetch from it right now. A fix is published automatically once detected —
+		check for it now, or try again later. Other sources you have enabled are used automatically
+		when they have this episode.
 	</p>
 	<div class="actions">
 		<Button onclick={oncheck} disabled={checking}>

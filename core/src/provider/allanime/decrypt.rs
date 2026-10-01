@@ -412,14 +412,19 @@ mod tests {
     }
 
     #[test]
-    fn aa_boot_matches_live_client_2026_09() {
+    fn aa_boot_matches_live_client_2026_09_09() {
         // Captured 2026-09-09 by hooking SubtleCrypto in the real web client
         // (scripts/allanime-oracle): importKey(HMAC, mask), sign("ld1faaOf3G:166"),
         // then sign("mkissa:k7:2957:mkissa.to:166") -> the x-aa-boot header sent.
+        //
+        // Pinned as *data*, not via the live constants: this is a regression
+        // test for the algorithm, so it must keep passing across rotations.
+        // Reading QD_MASK_HEX/BOOT_LABEL/BOOT_SIG_TEMPLATE here made every
+        // rotation red and would have blocked the auto-port pipeline.
         let got = sign_aa_boot(
-            super::super::QD_MASK_HEX,
-            super::super::BOOT_LABEL,
-            super::super::BOOT_SIG_TEMPLATE,
+            "93bf9583f597adb57f0823c99532cdc02a359c1a0f04a8a6b935d1e34587a27b",
+            "ld1faaOf3G:",
+            "{key_group}:{lane}:{epoch}:{referer_host}:{build_id}",
             &BootSig {
                 build_id: "166",
                 key_group: "mkissa",
@@ -432,6 +437,31 @@ mod tests {
         assert_eq!(
             got,
             "59199a3a63e6c8cb88c9204aa2aa2321401005d5b0852d6a027bb7973d3e5474"
+        );
+    }
+
+    #[test]
+    fn aa_boot_matches_live_client_2026_09_18() {
+        // The buildId 174 scheme (2026-09-18): allanime moved the outer
+        // signature from ":"-joined to "+"-joined AND reordered its fields.
+        // Captured and verified against the real client by the oracle; the
+        // expectation was computed independently with node:crypto.
+        let got = sign_aa_boot(
+            "3777df816330efb2095bfae2b7942b88183a73fc59532b629e4c0fd2f5a9f841",
+            "3HZDdfe:",
+            "{build_id}+{lane}+{epoch}+{referer_host}+{key_group}",
+            &BootSig {
+                build_id: "174",
+                key_group: "mkissa",
+                referer_host: "mkissa.to",
+                epoch: 2959,
+                lane: "k7",
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            got,
+            "04cb708eea31ffee4d31b5b4b53b9c824c2bc78be740d36446d01be13c43e399"
         );
     }
 

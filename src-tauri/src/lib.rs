@@ -17,6 +17,9 @@ use anidoku_core::db::Database;
 use anidoku_core::downloads::{DownloadEvent, DownloadManager};
 use anidoku_core::media_server;
 use anidoku_core::provider::allanime::AllAnime;
+use anidoku_core::provider::animegg::AnimeGg;
+use anidoku_core::provider::anizone::AniZone;
+use anidoku_core::provider::{Provider, Registry};
 use anidoku_core::proxy::ProxyClient;
 use auth::AuthStore;
 use std::path::PathBuf;
@@ -25,7 +28,10 @@ use tauri::Emitter;
 
 /// Shared application state, injected into every command.
 pub struct AppState {
-    pub provider: Arc<AllAnime>,
+    /// Every scraping source the app can use, in failover order. Commands
+    /// dispatch through `provider::aggregate` rather than holding a concrete
+    /// scraper, so adding a source touches no command.
+    pub sources: Arc<Registry>,
     pub db: Arc<Database>,
     pub proxy: Arc<ProxyClient>,
     /// Base URL of the loopback media server, e.g. `http://127.0.0.1:52123`.
@@ -79,7 +85,16 @@ impl AppState {
         let db = Arc::new(Database::open(&db_path).expect("open database"));
         let proxy = Arc::new(ProxyClient::new());
         let auth = AuthStore::load(&data_dir);
-        let provider = Arc::new(AllAnime::new());
+        // Registration order is the default failover order; the user can
+        // reorder or disable sources in Settings (persisted in app_settings).
+        // The three fail independently: allanime breaks when its request
+        // signing rotates, the other two only if their markup changes or the
+        // host is down.
+        let sources = Arc::new(Registry::new(vec![
+            Arc::new(AllAnime::new()) as Arc<dyn Provider>,
+            Arc::new(AniZone::new()),
+            Arc::new(AnimeGg::new()),
+        ]));
         let downloads_root = data_dir.join("downloads");
         std::fs::create_dir_all(&downloads_root).expect("create downloads dir");
 
@@ -96,13 +111,13 @@ impl AppState {
         let downloads = DownloadManager::new(
             db.clone(),
             proxy.clone(),
-            provider.clone(),
+            sources.clone(),
             downloads_root.clone(),
             download_events,
         );
 
         AppState {
-            provider,
+            sources,
             db,
             proxy,
             media_base: media.base,
@@ -124,15 +139,17 @@ pub fn run() {
     #[cfg(any(target_os = "android", target_os = "ios"))]
     let dl_db = state.db.clone();
 
-    // Pull any published allanime remote-config override in the background so a
-    // provider rotation the maintainer has already fixed is picked up without a
-    // release. No-ops (no network) when REMOTE_CONFIG_URL is unset; failures are
-    // swallowed, leaving the baked-in defaults. The self-heal path in `sources`
-    // also refreshes on demand, so this is just a head start.
+    // Pull every source's published remote-config override in the background so
+    // a rotation the maintainer has already fixed is picked up without a
+    // release. Sources with nothing volatile no-op. Failures are swallowed,
+    // leaving the baked-in defaults. The self-heal path in `sources` also
+    // refreshes on demand, so this is just a head start.
     {
-        let provider = state.provider.clone();
+        let sources = state.sources.clone();
         tauri::async_runtime::spawn(async move {
-            provider.refresh_config(true).await;
+            for p in sources.all() {
+                p.refresh_config(true).await;
+            }
         });
     }
 
@@ -236,6 +253,9 @@ pub fn run() {
             commands::get_notify_planning,
             commands::set_notify_planning,
             commands::refresh_provider_config,
+            commands::set_source_order,
+            commands::set_source_enabled,
+            commands::set_preferred_source,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AniDoku")

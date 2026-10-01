@@ -14,7 +14,9 @@ mod decrypt;
 mod parse;
 
 use crate::models::{AnimeSummary, TranslationType, VideoSource};
+use crate::provider::rank::playability_rank;
 use crate::provider::Provider;
+use crate::provider::{Capabilities, SourceStatus};
 use crate::{Error, Result};
 use async_trait::async_trait;
 use config::AllAnimeConfig;
@@ -29,6 +31,12 @@ pub use constants::*;
 /// keeps failing (dead episode, offline) can't hammer the config host.
 const REFRESH_THROTTLE: Duration = Duration::from_secs(30);
 
+impl AllAnime {
+    /// Stable slug — persisted in namespaced ids and settings; never change it.
+    pub const ID: &'static str = "allanime";
+    pub const DISPLAY_NAME: &'static str = "AllAnime";
+}
+
 pub struct AllAnime {
     client: Client,
     /// Live, runtime-overridable copy of the volatile allanime constants. Starts
@@ -40,18 +48,6 @@ pub struct AllAnime {
     last_refresh: RwLock<Option<Instant>>,
     /// Whether the live config came from the remote override (vs. baked-in).
     remote_applied: RwLock<bool>,
-}
-
-/// Snapshot of where the provider's volatile config currently comes from —
-/// surfaced in the app's Settings so a user (or a bug report) can tell whether
-/// the self-heal has kicked in.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct ProviderStatus {
-    pub build_id: String,
-    /// `"remote"` once a remote override has been applied, else `"baked"`.
-    pub config_source: &'static str,
-    /// The remote config URL in effect (empty = self-heal disabled).
-    pub config_url: String,
 }
 
 impl Default for AllAnime {
@@ -224,10 +220,12 @@ impl AllAnime {
         true
     }
 
-    /// See [`ProviderStatus`].
-    pub fn status(&self) -> ProviderStatus {
+    /// See [`SourceStatus`].
+    pub fn status(&self) -> SourceStatus {
         let remote = self.remote_applied.read().map(|r| *r).unwrap_or(false);
-        ProviderStatus {
+        SourceStatus {
+            source: Self::ID.to_string(),
+            display_name: Self::DISPLAY_NAME.to_string(),
             build_id: self.config().build_id,
             config_source: if remote { "remote" } else { "baked" },
             config_url: self.config_url.clone(),
@@ -392,46 +390,6 @@ impl AllAnime {
     }
 }
 
-/// Best-effort playability ranking for ordering sources (0 = best).
-///
-/// A webview `<video>` can only play a direct media file (MP4/HLS), not an
-/// embed *page*. allanime mixes both kinds into one list; ani-cli sidesteps
-/// this by only handling a known subset. We can't extract embed pages here, so
-/// we at least float the directly-playable sources to the top:
-///   0 — looks like a direct media file / known direct CDN
-///   1 — unknown (could be either)
-///   2 — looks like an HTML embed page (ok.ru, mp4upload, /e/…, …)
-pub fn playability_rank(s: &crate::models::VideoSource) -> u8 {
-    let url = s.url.to_ascii_lowercase();
-    let path = url.split(['?', '#']).next().unwrap_or(&url);
-
-    let is_media_ext = path.ends_with(".m3u8")
-        || path.ends_with(".mp4")
-        || path.ends_with(".m4v")
-        || path.ends_with(".mkv")
-        || path.ends_with(".webm");
-    let is_direct_cdn = url.contains("fast4speed")
-        || url.contains("wixmp")
-        || (url.contains("sharepoint.com") && url.contains("download.aspx"));
-    if matches!(s.kind, crate::models::StreamKind::Hls) || is_media_ext || is_direct_cdn {
-        return 0;
-    }
-
-    let is_embed_page = path.ends_with(".html")
-        || url.contains("/e/")
-        || url.contains("/embed")
-        || url.contains("videoembed")
-        || url.contains("ok.ru")
-        || url.contains("mp4upload")
-        || url.contains("vidnest")
-        // Fragment-routed single-page embeds (e.g. allanime.uns.bio/#abc123).
-        || url.contains("uns.bio");
-    if is_embed_page {
-        return 2;
-    }
-    1
-}
-
 /// Recursively search for a `tobeparsed` string field anywhere in the value.
 fn find_tobeparsed(v: &Value) -> Option<&str> {
     match v {
@@ -448,8 +406,22 @@ fn find_tobeparsed(v: &Value) -> Option<&str> {
 
 #[async_trait]
 impl Provider for AllAnime {
-    fn name(&self) -> &'static str {
-        "allanime"
+    fn id(&self) -> &'static str {
+        Self::ID
+    }
+
+    fn display_name(&self) -> &'static str {
+        Self::DISPLAY_NAME
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            dub: true,
+            // allanime's Show object carries `aniListId`, so mapping is exact
+            // and free — see crate::sync::matching.
+            carries_anilist_id: true,
+            subtitles: true,
+        }
     }
 
     async fn search(&self, query: &str, mode: TranslationType) -> Result<Vec<AnimeSummary>> {
@@ -498,6 +470,14 @@ impl Provider for AllAnime {
                 .map_err(classify_rotation);
         }
         first.map_err(classify_rotation)
+    }
+
+    fn status(&self) -> SourceStatus {
+        AllAnime::status(self)
+    }
+
+    async fn refresh_config(&self, force: bool) -> bool {
+        AllAnime::refresh_config(self, force).await
     }
 }
 
@@ -588,6 +568,7 @@ impl AllAnime {
                 crate::models::StreamKind::Mp4
             };
             return Ok(vec![VideoSource {
+                source: String::new(),
                 provider_name: r.name,
                 quality: "auto".into(),
                 url: r.url,
@@ -641,6 +622,7 @@ impl AllAnime {
         Ok(find_player_src(&body)
             .map(|src| {
                 vec![VideoSource {
+                    source: String::new(),
                     provider_name: name.to_string(),
                     quality: "auto".into(),
                     url: src.to_string(),
@@ -740,6 +722,7 @@ fn parse_okru_metadata(body: &str, name: &str) -> Vec<VideoSource> {
                 .and_then(Value::as_str)
                 .map_or_else(|| "auto".to_string(), okru_quality);
             out.push(VideoSource {
+                source: String::new(),
                 provider_name: name.to_string(),
                 quality,
                 url: normalize_scheme(url),
@@ -752,6 +735,7 @@ fn parse_okru_metadata(body: &str, name: &str) -> Vec<VideoSource> {
     for key in ["hlsManifestUrl", "hlsMasterPlaylistUrl", "ondemandHls"] {
         if let Some(u) = v.get(key).and_then(Value::as_str).filter(|u| !u.is_empty()) {
             out.push(VideoSource {
+                source: String::new(),
                 provider_name: name.to_string(),
                 quality: "auto".into(),
                 url: normalize_scheme(u),
@@ -927,55 +911,6 @@ mod tests {
     fn parse_okru_metadata_empty_on_error_or_garbage() {
         assert!(parse_okru_metadata(r#"{"error":"copyrightsRestricted"}"#, "Ok").is_empty());
         assert!(parse_okru_metadata("not json", "Ok").is_empty());
-    }
-
-    fn src(url: &str, kind: crate::models::StreamKind) -> crate::models::VideoSource {
-        crate::models::VideoSource {
-            provider_name: "t".into(),
-            quality: "auto".into(),
-            url: url.into(),
-            kind,
-            referer: None,
-            subtitles: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn playability_rank_orders_direct_media_before_embeds() {
-        use crate::models::StreamKind::*;
-        // Direct media / known CDNs -> 0
-        assert_eq!(playability_rank(&src("https://cdn/x.mp4", Mp4)), 0);
-        assert_eq!(playability_rank(&src("https://cdn/x.m3u8", Hls)), 0);
-        assert_eq!(
-            playability_rank(&src(
-                "https://tools.fast4speed.rsvp/media/1?Authorization=z",
-                Mp4
-            )),
-            0
-        );
-        assert_eq!(
-            playability_rank(&src(
-                "https://x.sharepoint.com/_layouts/15/download.aspx?id=1",
-                Mp4
-            )),
-            0
-        );
-        // HTML embed pages -> 2
-        assert_eq!(
-            playability_rank(&src("https://ok.ru/videoembed/123", Mp4)),
-            2
-        );
-        assert_eq!(
-            playability_rank(&src("https://mp4upload.com/embed-a.html", Mp4)),
-            2
-        );
-        assert_eq!(playability_rank(&src("https://vidnest.io/e/abc", Mp4)), 2);
-        assert_eq!(
-            playability_rank(&src("https://allanime.uns.bio/#abc", Mp4)),
-            2
-        );
-        // Unknown -> 1
-        assert_eq!(playability_rank(&src("https://weird.host/thing", Mp4)), 1);
     }
 
     #[test]

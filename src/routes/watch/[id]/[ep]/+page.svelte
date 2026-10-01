@@ -5,6 +5,7 @@
 	import Hls from 'hls.js';
 	import {
 		getSources,
+		setPreferredSource,
 		getEpisodes,
 		getWatchState,
 		setWatchState,
@@ -35,7 +36,7 @@
 	let video = $state<HTMLVideoElement>();
 	let sources = $state<VideoSource[]>([]);
 	let selected = $state<VideoSource | null>(null);
-	let subtitles = $state<{ label: string; lang: string; src: string }[]>([]);
+	let subtitles = $state<{ label: string; lang: string; src: string; default: boolean }[]>([]);
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 	// Distinct from `error`: the provider answered fine, this episode just has no
@@ -79,6 +80,66 @@
 
 	// Distinct qualities for the selector.
 	const qualities = $derived(sources.map((s) => s.quality));
+
+	/// Group the picker by scraping source, preserving the backend's ranking
+	/// (best-playable first) both between groups and within one. With a single
+	/// source this collapses to the old flat "Quality" row.
+	const sourceGroups = $derived.by(() => {
+		const groups: { source: string; label: string; items: VideoSource[] }[] = [];
+		for (const s of sources) {
+			const key = s.source || 'unknown';
+			let g = groups.find((x) => x.source === key);
+			if (!g) {
+				g = { source: key, label: sourceLabel(key) ?? key, items: [] };
+				groups.push(g);
+			}
+			g.items.push(s);
+		}
+		return groups;
+	});
+
+	const SOURCE_NAMES: Record<string, string> = {
+		allanime: 'AllAnime',
+		anizone: 'AniZone',
+		animegg: 'AnimeGG'
+	};
+
+	/// Set when the links on screen come from a different source than the one
+	/// this show was opened from — i.e. that source failed or lacks the episode
+	/// and the backend fell across. Worth saying out loud: quality and
+	/// subtitles can differ, and it explains why a pinned source isn't in use.
+	const failover = $derived.by(() => {
+		const i = id.indexOf(':');
+		if (offline || i <= 0 || sources.length === 0) return null;
+		const owner = id.slice(0, i);
+		if (sources.some((s) => !s.source || s.source === owner)) return null;
+		const used = [...new Set(sources.map((s) => sourceLabel(s.source) ?? s.source))];
+		return { from: sourceLabel(owner) ?? owner, to: used.join(', ') };
+	});
+
+	/// Map a source slug to its display name. An unknown slug is shown as-is;
+	/// a pre-migration bare id has no source segment, so callers get null and
+	/// fall back to generic copy rather than a made-up name.
+	function sourceLabel(slug: string): string | null {
+		if (!slug) return null;
+		return SOURCE_NAMES[slug] ?? slug;
+	}
+
+	/// Display name of the source owning a namespaced show id. A pre-migration
+	/// bare id (no ':') belongs to no named source, so the generic copy is used
+	/// rather than mistaking the whole id for a source name.
+	function sourceOf(showId: string): string | null {
+		const i = showId.indexOf(':');
+		return i > 0 ? sourceLabel(showId.slice(0, i)) : null;
+	}
+
+	/// A manual pick is also a statement of preference: remember it for this
+	/// show so the next episode starts on the same source.
+	function rememberSource(s: VideoSource) {
+		if (!s.source) return;
+		// Best-effort: an unmapped show simply has no preference to store.
+		void setPreferredSource(id, s.source).catch(() => {});
+	}
 
 	$effect(() => {
 		// Re-run only when the route changes. `load` reads other reactive state
@@ -132,7 +193,8 @@
 					subtitles = info.subtitles.map((t) => ({
 						label: t.label,
 						lang: t.lang,
-						src: offlineUrl(base, info.dir, t.file)
+						src: offlineUrl(base, info.dir, t.file),
+						default: t.default ?? false
 					}));
 					queueMicrotask(() =>
 						attachMedia(info.kind, offlineUrl(base, info.dir, info.video))
@@ -192,13 +254,17 @@
 	function selectSource(s: VideoSource, manual = false) {
 		// A manual pick is a fresh intent: restart the fallback chain so every
 		// source is eligible again (including ones that failed earlier).
-		if (manual) attempted = new Set();
+		if (manual) {
+			attempted = new Set();
+			rememberSource(s);
+		}
 		attempted.add(s.url);
 		selected = s;
 		subtitles = s.subtitles.map((t: SubtitleTrack) => ({
 			label: t.label,
 			lang: t.lang,
-			src: mediaUrl(base, t.url, s.referer)
+			src: mediaUrl(base, t.url, s.referer),
+			default: t.default ?? false
 		}));
 		// Wait for the <video> to exist, then attach.
 		queueMicrotask(() =>
@@ -379,7 +445,7 @@
 		}
 	}
 
-	// External subtitle file: convert (SRT/VTT) in Rust, attach as a blob track.
+	// External subtitle file: convert (SRT/ASS/VTT) in Rust, attach as a blob track.
 	let extInput = $state<HTMLInputElement>();
 	async function onExternalSub(e: Event) {
 		const file = (e.target as HTMLInputElement).files?.[0];
@@ -437,6 +503,7 @@
 {:else if providerOutage && !selected}
 	<ProviderOutage
 		detail={providerOutage}
+		source={sourceOf(id)}
 		checking={checkingFix}
 		oncheck={() => void checkForFix()}
 		onretry={() => void load(id, ep, dub)}
@@ -459,7 +526,13 @@
 			onerror={onVideoError}
 		>
 			{#each subtitles as sub (sub.src)}
-				<track kind="subtitles" label={sub.label} srclang={sub.lang} src={sub.src} />
+				<track
+					kind="subtitles"
+					label={sub.label}
+					srclang={sub.lang}
+					src={sub.src}
+					default={sub.default}
+				/>
 			{/each}
 		</video>
 	</div>
@@ -487,22 +560,30 @@
 				<button class="streamlink" onclick={streamInstead}>Stream instead</button>
 			</div>
 		{/if}
-		{#if !offline && qualities.length > 1}
-			<div class="group">
-				<span class="label">Quality</span>
-				<div class="chips">
-					{#each sources as s (s.url)}
-						<button
-							class="chip"
-							class:active={selected?.url === s.url}
-							onclick={() => selectSource(s, true)}
-						>
-							{s.quality}
-							<span class="prov">{s.provider_name}</span>
-						</button>
-					{/each}
+		{#if failover}
+			<p class="failover" data-testid="failover-note" role="status">
+				{failover.from} isn't available for this episode right now — playing from {failover.to}
+				instead.
+			</p>
+		{/if}
+		{#if !offline && sources.length > 1}
+			{#each sourceGroups as g (g.source)}
+				<div class="group">
+					<span class="label">{sourceGroups.length > 1 ? g.label : 'Quality'}</span>
+					<div class="chips">
+						{#each g.items as s (s.url)}
+							<button
+								class="chip"
+								class:active={selected?.url === s.url}
+								onclick={() => selectSource(s, true)}
+							>
+								{s.quality}
+								<span class="prov">{s.provider_name}</span>
+							</button>
+						{/each}
+					</div>
 				</div>
-			</div>
+			{/each}
 		{/if}
 
 		<div class="group">
@@ -510,7 +591,7 @@
 			<input
 				bind:this={extInput}
 				type="file"
-				accept=".srt,.vtt"
+				accept=".srt,.vtt,.ass,.ssa"
 				style="display:none"
 				onchange={onExternalSub}
 			/>
@@ -612,6 +693,12 @@
 	.hint {
 		font: var(--text-caption);
 		color: var(--color-muted);
+	}
+	.failover {
+		flex-basis: 100%;
+		margin: 0;
+		font: var(--text-body-md);
+		color: var(--color-muted-strong);
 	}
 	.row {
 		display: flex;

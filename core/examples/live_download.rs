@@ -18,7 +18,7 @@ use anidoku_core::db::Database;
 use anidoku_core::downloads::{episode_dir_rel, DownloadEvent, DownloadManager};
 use anidoku_core::media_server;
 use anidoku_core::models::{DownloadState, StreamKind, TranslationType};
-use anidoku_core::provider::{allanime::AllAnime, Provider};
+use anidoku_core::provider::{allanime::AllAnime, Provider, Registry};
 use anidoku_core::proxy::ProxyClient;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -81,7 +81,7 @@ async fn main() {
     let mgr = DownloadManager::new(
         db.clone(),
         proxy.clone(),
-        provider.clone(),
+        Arc::new(Registry::new(vec![provider.clone()])),
         root.clone(),
         tx,
     );

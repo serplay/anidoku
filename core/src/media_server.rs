@@ -26,6 +26,7 @@
 
 use crate::proxy::{self, ProxyClient};
 use crate::range::parse_range;
+use crate::subs;
 use axum::{
     body::Body,
     extract::{Path as AxumPath, Query, State},
@@ -119,7 +120,14 @@ async fn handle_media(
         return serve_playlist(&st, url, referer, range.as_deref()).await;
     }
 
-    // Everything else (MP4, HLS segments, key files, subtitle files): stream
+    // Subtitle files the webview can't render natively (ASS/SSA/SRT) are
+    // converted to WebVTT here, so a `<track>` can point straight at whatever
+    // format a source happens to serve.
+    if let Some(ext) = subs::url_extension(url).filter(|e| subs::is_convertible(e)) {
+        return serve_subtitle(&st, url, referer, &ext, range.as_deref()).await;
+    }
+
+    // Everything else (MP4, HLS segments, key files, VTT subtitles): stream
     // through with Range forwarded so we relay upstream 206 / Content-Range.
     let resp = match st.proxy.get_ranged(url, referer, range.as_deref()).await {
         Ok(r) => r,
@@ -185,6 +193,43 @@ async fn serve_playlist(
         "application/vnd.apple.mpegurl",
         range,
     )
+}
+
+/// Fetch a subtitle file in full and serve it as WebVTT. A file that is
+/// already VTT despite its extension is passed through untouched.
+async fn serve_subtitle(
+    st: &ServerState,
+    url: &str,
+    referer: Option<&str>,
+    ext: &str,
+    range: Option<&str>,
+) -> Response {
+    let fetched = match st.proxy.fetch(url, referer).await {
+        Ok(f) => f,
+        Err(e) => {
+            return text(
+                StatusCode::BAD_GATEWAY,
+                &format!("upstream fetch failed: {e}"),
+            )
+        }
+    };
+    serve_bytes(
+        subtitle_to_vtt(&fetched.bytes, ext).into_bytes(),
+        "text/vtt; charset=utf-8",
+        range,
+    )
+}
+
+/// Convert fetched subtitle bytes to WebVTT. Never fails: an unconvertible
+/// file becomes an empty track, which the player shows as "no cues" instead
+/// of a broken `<track>`.
+fn subtitle_to_vtt(bytes: &[u8], ext: &str) -> String {
+    let content = String::from_utf8_lossy(bytes);
+    let body = content.trim_start_matches('\u{feff}').trim_start();
+    if body.starts_with("WEBVTT") {
+        return body.to_string();
+    }
+    subs::to_vtt(&content, ext).unwrap_or_else(|_| "WEBVTT\n\n".to_string())
 }
 
 /// Relay a streaming upstream response, preserving status (200/206), content
@@ -413,6 +458,22 @@ mod tests {
         // The upstream query separators must be encoded, not leak into ours.
         assert!(u.contains("token%3Da"));
         assert!(u.contains("&referer=https%3A%2F%2Fref.example"));
+    }
+
+    #[test]
+    fn subtitles_are_converted_to_vtt_whatever_the_source_serves() {
+        let ass = b"[Events]\nFormat: Start,End,Text\nDialogue: 0:00:01.00,0:00:02.00,Hello\n";
+        let vtt = subtitle_to_vtt(ass, "ass");
+        assert!(
+            vtt.contains("00:00:01.000 --> 00:00:02.000\nHello"),
+            "{vtt}"
+        );
+        // Already VTT behind a misleading extension (and a BOM): passed through.
+        let already = b"\xef\xbb\xbfWEBVTT\n\n00:01.000 --> 00:02.000\nHi\n";
+        let vtt = subtitle_to_vtt(already, "srt");
+        assert!(vtt.starts_with("WEBVTT") && vtt.contains("00:01.000 --> 00:02.000"));
+        // Not text at all: an empty track rather than an error.
+        assert_eq!(subtitle_to_vtt(&[0xff, 0xfe, 0x00], "ass"), "WEBVTT\n\n");
     }
 
     #[test]

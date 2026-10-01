@@ -102,8 +102,8 @@ pub const API_URL: &str = "https://api.mkissa.net/api";
 /// x-aa-boot tokens and the bootstrap request. Baked into the web client (the
 /// crypto bundle: `qf = (ta(..)+ta(..)) !== "string" ? "86" : ""`). Rotates
 /// often — 63 (mid-Jul), 75 (2026-07-30), 81 (2026-08-02), 86 (2026-08-05),
-/// 92 (2026-08-07), 166 (seen 2026-09-09).
-pub const BUILD_ID: &str = "166";
+/// 92 (2026-08-07), 166 (2026-09-09), 174 (2026-09-18), 177 (2026-10-01).
+pub const BUILD_ID: &str = "177";
 
 /// Per-epoch key bootstrap endpoint (base; the `?buildId=&k=<lane>` query is
 /// built at call time). Returns `{"epoch":<int>,"partB":<b64>,"switchAt":..}`;
@@ -131,13 +131,20 @@ pub const REFERER_HOST: &str = "mkissa.to";
 /// Label prefixing the buildId in the `x-aa-boot` inner-key derivation:
 /// `inner = HMAC(mask, BOOT_LABEL + buildId)`. Was `aa-boot:` until 2026-09;
 /// it is now an opaque rotating string, so it lives in the config too.
-pub const BOOT_LABEL: &str = "ld1faaOf3G:";
+pub const BOOT_LABEL: &str = "I5AgJjIcVH:";
 
 /// Template for the `x-aa-boot` outer signature. Placeholders `{build_id}`,
 /// `{key_group}`, `{referer_host}`, `{epoch}`, `{lane}` are substituted at
-/// sign time (`decrypt::render_template`). Was
-/// `{build_id}:{key_group}:{referer_host}:{epoch}:{lane}` until 2026-09.
-pub const BOOT_SIG_TEMPLATE: &str = "{key_group}:{lane}:{epoch}:{referer_host}:{build_id}";
+/// sign time (`decrypt::render_template`).
+///
+/// **Both the separator and the field order rotate.** Seen so far:
+/// `{build_id}:{key_group}:{referer_host}:{epoch}:{lane}` (until 2026-09),
+/// `{key_group}:{lane}:{epoch}:{referer_host}:{build_id}` (buildId 166),
+/// `{build_id}+{lane}+{epoch}+{referer_host}+{key_group}` (buildId 174),
+/// `{key_group}/{lane}/{referer_host}/{build_id}/{epoch}` (buildId 177).
+/// Nothing may assume ':' — that assumption in the oracle cost a 4.5-day
+/// outage (issue #6); see scripts/allanime-oracle/boot-template.ts.
+pub const BOOT_SIG_TEMPLATE: &str = "{key_group}/{lane}/{referer_host}/{build_id}/{epoch}";
 
 /// Template for the aaReq nonce seed (`SHA-256(seed)[..12]`). Placeholders
 /// `{epoch}`, `{build_id}`, `{qh}`, `{ts}`, `{lane}`. Unchanged so far; made
@@ -153,7 +160,7 @@ pub const EPOCH_BUCKET_MS: u128 = 604_800_000;
 /// Static mask XORed with the bootstrap `partB` to derive the AES-256 key, and
 /// HMAC-keyed for `x-aa-boot`. The web client computes it as `ev(buildId)` (was
 /// `Fh`) over an embedded `ad` byte-array, so it rotates with `BUILD_ID`.
-pub const QD_MASK_HEX: &str = "93bf9583f597adb57f0823c99532cdc02a359c1a0f04a8a6b935d1e34587a27b";
+pub const QD_MASK_HEX: &str = "b1ca68cba9ce7464fd20e16233502556680eaee5a169cf3b6ebbf70f42b7ccc9";
 
 /// The `episode(...)` sources GraphQL query we send.
 ///

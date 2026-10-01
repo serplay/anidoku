@@ -20,9 +20,14 @@ export interface SubtitleTrack {
 	label: string;
 	lang: string;
 	url: string;
+	/** The track to show without being asked (sources with no burned-in subs). */
+	default?: boolean;
 }
 
 export interface VideoSource {
+	/** Which scraping source produced this link ("allanime", "hianime", ...).
+	 * Distinct from `provider_name`, which is the upstream CDN host. */
+	source: string;
 	provider_name: string;
 	quality: string;
 	url: string;
@@ -173,13 +178,24 @@ export interface MediaOverview {
 	season_year: number | null;
 }
 
+/** One scraping source as Settings shows it. */
+export interface SourceSetting {
+	/** Stable slug ("allanime"); persisted, never shown raw where avoidable. */
+	source: string;
+	display_name: string;
+	/** Client build id, when the source has one that rotates. */
+	build_id: string;
+	/** "baked" | "remote" | "static" — where the live config came from. */
+	config_source: string;
+	config_url: string;
+	enabled: boolean;
+}
+
 export interface Settings {
 	client_id: string | null;
 	redirect_url: string;
-	/** Streaming provider build id (rotates with allanime). */
-	provider_build_id?: string;
-	/** "baked" | "remote" — whether the self-heal remote config has been applied. */
-	provider_config_source?: string;
+	/** Enabled sources in failover order, then the disabled ones. */
+	sources: SourceSetting[];
 }
 
 export interface ProviderRefresh {
@@ -197,9 +213,23 @@ export function isProviderRotated(message: string): boolean {
 	return message.includes(PROVIDER_ROTATED_PREFIX);
 }
 
-/** Force-fetch the provider's remote config ("Check for fix"). */
-export function refreshProviderConfig(): Promise<ProviderRefresh> {
-	return invoke('refresh_provider_config');
+/** Force-fetch remote config ("Check for fix"). Omit `source` for all of them. */
+export function refreshProviderConfig(source?: string): Promise<ProviderRefresh> {
+	return invoke('refresh_provider_config', { source: source ?? null });
+}
+
+/** Reorder the failover chain (slugs, best first). */
+export function setSourceOrder(order: string[]): Promise<void> {
+	return invoke('set_source_order', { order });
+}
+
+export function setSourceEnabled(source: string, enabled: boolean): Promise<void> {
+	return invoke('set_source_enabled', { source, enabled });
+}
+
+/** Pin which source a show plays from (the watch page's manual pick). */
+export function setPreferredSource(showId: string, source: string): Promise<void> {
+	return invoke('set_preferred_source', { showId, source });
 }
 
 export interface AuthStatus {
@@ -516,6 +546,7 @@ export interface OfflineSubtitle {
 	label: string;
 	lang: string;
 	file: string;
+	default?: boolean;
 }
 
 export interface OfflineInfo {

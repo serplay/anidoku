@@ -153,6 +153,77 @@ const MIGRATIONS: &[&str] = &[
         checked_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
     ",
+    // 007: multi-source. Two assumptions had to go:
+    //
+    //   1. Show ids were bare provider ids, so ids from two sources could
+    //      collide and nothing said who could resolve one. Every id becomes
+    //      "<source>:<show_id>" (provider::id::SourceId). The prefix is opaque
+    //      to routing and to the schema, so /anime/<id>, the FK, and the
+    //      download path all keep working.
+    //   2. `anime.anilist_id` was UNIQUE, which hard-capped each AniList show
+    //      at one source. Mappings move to `anime_sources` (many per show, one
+    //      marked preferred). SQLite cannot drop a constraint, so `anime` is
+    //      rebuilt.
+    //
+    // NOT migrated, deliberately: `downloads.dir_path`. It names real
+    // directories on disk (written via downloads::sanitize_component, which
+    // maps ':' to '_'). Leaving stored paths alone keeps every completed
+    // download playable with zero filesystem work; new jobs simply get the
+    // namespaced path. `anime_id` still moves, because that is what joins to
+    // `anime` and what the UI routes on.
+    "
+    PRAGMA foreign_keys = off;
+
+    CREATE TABLE anime_new (
+        provider_id   TEXT PRIMARY KEY,
+        source        TEXT NOT NULL,
+        anilist_id    INTEGER,
+        title_romaji  TEXT NOT NULL,
+        title_english TEXT,
+        cover_url     TEXT,
+        episode_count INTEGER,
+        format        TEXT,
+        cached_at     INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+    INSERT INTO anime_new
+        SELECT 'allanime:'||provider_id, 'allanime', anilist_id, title_romaji,
+               title_english, cover_url, episode_count, format, cached_at
+        FROM anime;
+    DROP TABLE anime;
+    ALTER TABLE anime_new RENAME TO anime;
+    CREATE INDEX idx_anime_anilist ON anime(anilist_id);
+    CREATE INDEX idx_anime_source ON anime(source);
+
+    UPDATE episodes    SET anime_id = 'allanime:'||anime_id;
+    UPDATE downloads   SET anime_id = 'allanime:'||anime_id;
+    UPDATE watch_state SET anime_id = 'allanime:'||anime_id;
+
+    CREATE TABLE anime_sources (
+        anilist_id  INTEGER NOT NULL,
+        source      TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        preferred   INTEGER NOT NULL DEFAULT 0,
+        linked_at   INTEGER NOT NULL DEFAULT (unixepoch()),
+        PRIMARY KEY (anilist_id, source)
+    );
+    CREATE UNIQUE INDEX idx_anime_sources_provider ON anime_sources(provider_id);
+    INSERT INTO anime_sources (anilist_id, source, provider_id, preferred)
+        SELECT anilist_id, source, provider_id, 1 FROM anime WHERE anilist_id IS NOT NULL;
+
+    CREATE TABLE availability_new (
+        anilist_id INTEGER NOT NULL,
+        source     TEXT NOT NULL,
+        available  INTEGER NOT NULL,
+        checked_at INTEGER NOT NULL DEFAULT (unixepoch()),
+        PRIMARY KEY (anilist_id, source)
+    );
+    INSERT INTO availability_new (anilist_id, source, available, checked_at)
+        SELECT anilist_id, 'allanime', available, checked_at FROM availability;
+    DROP TABLE availability;
+    ALTER TABLE availability_new RENAME TO availability;
+
+    PRAGMA foreign_keys = on;
+    ",
 ];
 
 pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
@@ -166,4 +237,193 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a database at the schema version just before 007 and fill it with
+    /// the kind of rows a real install would have accumulated.
+    fn legacy_db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        for sql in &MIGRATIONS[..MIGRATIONS.len() - 1] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.execute_batch(
+            "
+            INSERT INTO anime (provider_id, anilist_id, title_romaji, episode_count)
+                VALUES ('ReooPAxPMsHM4KPMY', 21, 'One Piece', 1100),
+                       ('unmappedShowId', NULL, 'Some Show', 12);
+            INSERT INTO episodes (anime_id, number) VALUES ('ReooPAxPMsHM4KPMY', '1');
+            INSERT INTO downloads (anime_id, episode_number, state, dir_path)
+                VALUES ('ReooPAxPMsHM4KPMY', '1', 'done', 'ReooPAxPMsHM4KPMY/1');
+            INSERT INTO watch_state (anime_id, episode_number, position_secs)
+                VALUES ('ReooPAxPMsHM4KPMY', '1', 421.5);
+            INSERT INTO availability (anilist_id, available) VALUES (21, 1);
+            ",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn migrate_to_007(conn: &Connection) {
+        conn.execute_batch(MIGRATIONS[MIGRATIONS.len() - 1])
+            .unwrap();
+    }
+
+    fn one<T: rusqlite::types::FromSql>(conn: &Connection, sql: &str) -> T {
+        conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn migration_007_namespaces_every_id_that_joins() {
+        let conn = legacy_db();
+        migrate_to_007(&conn);
+
+        assert_eq!(
+            one::<String>(&conn, "SELECT provider_id FROM anime WHERE anilist_id = 21"),
+            "allanime:ReooPAxPMsHM4KPMY"
+        );
+        assert_eq!(
+            one::<String>(&conn, "SELECT source FROM anime WHERE anilist_id = 21"),
+            "allanime"
+        );
+        for t in ["episodes", "downloads", "watch_state"] {
+            assert_eq!(
+                one::<String>(&conn, &format!("SELECT anime_id FROM {t}")),
+                "allanime:ReooPAxPMsHM4KPMY",
+                "{t}.anime_id was not namespaced"
+            );
+        }
+    }
+
+    #[test]
+    fn migration_007_leaves_download_paths_on_disk_alone() {
+        // dir_path names real directories; rewriting it would orphan every
+        // completed download. New jobs get the namespaced path instead.
+        let conn = legacy_db();
+        migrate_to_007(&conn);
+        assert_eq!(
+            one::<String>(&conn, "SELECT dir_path FROM downloads"),
+            "ReooPAxPMsHM4KPMY/1"
+        );
+    }
+
+    #[test]
+    fn migration_007_preserves_watch_progress() {
+        let conn = legacy_db();
+        migrate_to_007(&conn);
+        assert_eq!(
+            one::<f64>(&conn, "SELECT position_secs FROM watch_state"),
+            421.5
+        );
+    }
+
+    #[test]
+    fn migration_007_backfills_mappings_as_preferred() {
+        let conn = legacy_db();
+        migrate_to_007(&conn);
+        assert_eq!(
+            one::<String>(
+                &conn,
+                "SELECT provider_id FROM anime_sources WHERE anilist_id = 21"
+            ),
+            "allanime:ReooPAxPMsHM4KPMY"
+        );
+        assert_eq!(
+            one::<i64>(
+                &conn,
+                "SELECT preferred FROM anime_sources WHERE anilist_id = 21"
+            ),
+            1
+        );
+        // An unmapped show contributes no mapping row.
+        assert_eq!(one::<i64>(&conn, "SELECT COUNT(*) FROM anime_sources"), 1);
+        // ...but its cache row survives.
+        assert_eq!(
+            one::<i64>(
+                &conn,
+                "SELECT COUNT(*) FROM anime WHERE provider_id = 'allanime:unmappedShowId'"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn migration_007_lets_one_anilist_show_map_to_several_sources() {
+        // The whole point: `anime.anilist_id UNIQUE` used to forbid this.
+        let conn = legacy_db();
+        migrate_to_007(&conn);
+        conn.execute_batch(
+            "INSERT INTO anime (provider_id, source, anilist_id, title_romaji)
+                 VALUES ('hianime:one-piece-100', 'hianime', 21, 'One Piece');
+             INSERT INTO anime_sources (anilist_id, source, provider_id, preferred)
+                 VALUES (21, 'hianime', 'hianime:one-piece-100', 0);",
+        )
+        .unwrap();
+        assert_eq!(
+            one::<i64>(
+                &conn,
+                "SELECT COUNT(*) FROM anime_sources WHERE anilist_id = 21"
+            ),
+            2
+        );
+        // The preferred one still wins the deep-link lookup.
+        assert_eq!(
+            one::<String>(
+                &conn,
+                "SELECT provider_id FROM anime_sources WHERE anilist_id = 21
+                 ORDER BY preferred DESC, linked_at ASC LIMIT 1"
+            ),
+            "allanime:ReooPAxPMsHM4KPMY"
+        );
+    }
+
+    #[test]
+    fn migration_007_carries_availability_over_as_allanime() {
+        let conn = legacy_db();
+        migrate_to_007(&conn);
+        assert_eq!(
+            one::<String>(
+                &conn,
+                "SELECT source FROM availability WHERE anilist_id = 21"
+            ),
+            "allanime"
+        );
+        assert_eq!(
+            one::<i64>(
+                &conn,
+                "SELECT available FROM availability WHERE anilist_id = 21"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn a_fresh_database_lands_on_the_same_schema_as_a_migrated_one() {
+        let fresh = Connection::open_in_memory().unwrap();
+        migrate(&fresh).unwrap();
+        let migrated = legacy_db();
+        migrate_to_007(&migrated);
+
+        let cols = |c: &Connection, t: &str| -> Vec<String> {
+            let mut st = c
+                .prepare(&format!(
+                    "SELECT name FROM pragma_table_info('{t}') ORDER BY name"
+                ))
+                .unwrap();
+            let v = st.query_map([], |r| r.get::<_, String>(0)).unwrap();
+            v.map(|r| r.unwrap()).collect()
+        };
+        for t in [
+            "anime",
+            "anime_sources",
+            "availability",
+            "downloads",
+            "watch_state",
+        ] {
+            assert_eq!(cols(&fresh, t), cols(&migrated, t), "{t} schema drifted");
+        }
+    }
 }
