@@ -8,13 +8,16 @@
 //!   bare id;
 //! - `VideoSource.source` is stamped here rather than trusted from a scraper;
 //! - a source that is slow, broken, or mid-rotation is skipped, never fatal —
-//!   the whole point of having more than one.
+//!   the whole point of having more than one;
+//! - when the source a show was opened from fails, the same show is found on
+//!   the others (by link, or by a strict title match) and played from there.
 
 use super::id::SourceId;
 use super::rank::playability_rank;
 use super::registry::Registry;
 use crate::db::Database;
 use crate::models::{AnimeSummary, TranslationType, VideoSource};
+use crate::sync::matching::{best_provider_match, confident_provider_match};
 use crate::{Error, Result};
 use futures_util::future::join_all;
 use std::sync::Arc;
@@ -25,9 +28,20 @@ use std::time::Duration;
 /// up a search.
 pub const PER_SOURCE_TIMEOUT: Duration = Duration::from_secs(12);
 
+/// Ceiling for listing a show's episodes. Longer than [`PER_SOURCE_TIMEOUT`]
+/// because some sources page through a long-running show request by request.
+pub const EPISODES_TIMEOUT: Duration = Duration::from_secs(45);
+
 /// Run `fut`, treating a timeout as a source-level failure rather than a hang.
 async fn bounded<T>(fut: impl std::future::Future<Output = Result<T>>) -> Result<T> {
-    match tokio::time::timeout(PER_SOURCE_TIMEOUT, fut).await {
+    bounded_by(PER_SOURCE_TIMEOUT, fut).await
+}
+
+async fn bounded_by<T>(
+    limit: Duration,
+    fut: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    match tokio::time::timeout(limit, fut).await {
         Ok(r) => r,
         Err(_) => Err(Error::Provider("source timed out".into())),
     }
@@ -83,27 +97,44 @@ pub async fn search_all(
     out
 }
 
-/// Episode list for a namespaced show id, from the source that owns it.
+/// Episode list for a namespaced show id.
+///
+/// Comes from the source that owns the id; if that source is down (or simply
+/// has nothing in this translation), the list comes from another source that
+/// has the same show, so a show page still opens during an outage.
 pub async fn episodes(
     registry: &Registry,
+    db: &Database,
     show_id: &str,
     mode: TranslationType,
 ) -> Result<Vec<String>> {
     let id = SourceId::parse(show_id);
-    let p = registry
+    let primary = registry
         .get(&id.source)
         .ok_or_else(|| Error::Provider(format!("unknown source {:?}", id.source)))?;
-    p.episodes(&id.show, mode).await
+
+    let first = bounded_by(EPISODES_TIMEOUT, primary.episodes(&id.show, mode)).await;
+    if matches!(&first, Ok(v) if !v.is_empty()) {
+        return first;
+    }
+    for (p, show) in siblings(registry, db, &id, mode).await {
+        if let Ok(v) = bounded_by(EPISODES_TIMEOUT, p.episodes(&show, mode)).await {
+            if !v.is_empty() {
+                return Ok(v);
+            }
+        }
+    }
+    first
 }
 
 /// Resolve one episode to playable links, falling across sources.
 ///
 /// The named source is tried first (it is what the user is looking at). If it
 /// yields nothing — rotated, episode missing, host down — every *other* source
-/// mapped to the same AniList show is tried in parallel and the results merged
-/// into one ranked list. The watch page's existing per-URL fall-forward then
-/// walks that list, so a broken source degrades into a slightly slower start
-/// rather than an outage.
+/// that has the same show is tried in parallel and the results merged into one
+/// ranked list. The watch page's existing per-URL fall-forward then walks that
+/// list, so a broken source degrades into a slightly slower start rather than
+/// an outage.
 ///
 /// The original error is preserved when nothing anywhere resolves, so a
 /// rotation still surfaces as a rotation and not as a bland "no sources".
@@ -126,28 +157,7 @@ pub async fn sources_for(
         }
     }
 
-    // Siblings: other sources already mapped to the same AniList show.
-    let siblings: Vec<(String, String)> = db
-        .anilist_id_for_provider(show_id)
-        .ok()
-        .flatten()
-        .and_then(|anilist_id| db.sources_for_anilist(anilist_id).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|(source, _)| source != &id.source)
-        .collect();
-
-    let enabled = enabled_for(registry, db, mode);
-    let attempts: Vec<_> = siblings
-        .iter()
-        .filter_map(|(source, sid)| {
-            enabled
-                .iter()
-                .find(|p| p.id() == source)
-                .map(|p| (p.clone(), SourceId::parse(sid).show))
-        })
-        .collect();
-
+    let attempts = siblings(registry, db, &id, mode).await;
     let results = join_all(
         attempts
             .iter()
@@ -168,6 +178,140 @@ pub async fn sources_for(
 
     // Nothing anywhere: report what the source the user asked for said.
     first.map(|v| finish(v, primary.id()))
+}
+
+/// Every other enabled source that has the same show as `id`, with its own
+/// id for it.
+///
+/// Sources already linked to the show's AniList entry are known. The rest are
+/// *discovered*: searched by the show's cached titles and accepted only on a
+/// confident, same-season match. Without this, failover would only ever work
+/// for shows the user happened to open while every source was healthy —
+/// exactly not the case that matters.
+async fn siblings(
+    registry: &Registry,
+    db: &Database,
+    id: &SourceId,
+    mode: TranslationType,
+) -> Vec<(Arc<dyn super::Provider>, String)> {
+    let key = id.to_string();
+    let anilist_id = db.anilist_id_for_provider(&key).ok().flatten();
+    let linked: Vec<(String, String)> = anilist_id
+        .and_then(|a| db.sources_for_anilist(a).ok())
+        .unwrap_or_default();
+
+    let mut known = Vec::new();
+    let mut unknown = Vec::new();
+    for p in enabled_for(registry, db, mode) {
+        if p.id() == id.source {
+            continue;
+        }
+        match linked.iter().find(|(source, _)| source == p.id()) {
+            Some((_, sid)) => known.push((p, SourceId::parse(sid).show)),
+            None if !registry.recently_missed(&key, p.id()) => unknown.push(p),
+            None => {}
+        }
+    }
+    if unknown.is_empty() {
+        return known;
+    }
+
+    // Titles to search by: whatever the owning source called the show.
+    let Some((romaji, english, _)) = db.get_cached_anime(&key).ok().flatten() else {
+        return known;
+    };
+    let titles: Vec<&str> = std::iter::once(romaji.as_str())
+        .chain(english.as_deref())
+        .filter(|t| !t.trim().is_empty())
+        .collect();
+    let episodes = anilist_id
+        .and_then(|a| db.media_episode_count(a).ok().flatten())
+        .and_then(|n| u32::try_from(n).ok());
+
+    let found = join_all(unknown.iter().map(|p| {
+        let titles = &titles;
+        async move {
+            for query in titles {
+                let hits = bounded(p.search(query, mode)).await.unwrap_or_default();
+                if let Some(m) = confident_provider_match(titles, episodes, &hits) {
+                    return Some(m.clone());
+                }
+            }
+            None
+        }
+    }))
+    .await;
+
+    for (p, hit) in unknown.into_iter().zip(found) {
+        let Some(hit) = hit else {
+            registry.note_miss(&key, p.id());
+            continue;
+        };
+        // Persist, so the next play (and the Settings/picker UI) sees the
+        // sibling without searching again.
+        let sibling = SourceId::new(p.id(), &hit.provider_id).to_string();
+        let _ = db.cache_anime(
+            &sibling,
+            &hit.title,
+            hit.title_english.as_deref(),
+            hit.cover_url.as_deref(),
+            Some(hit.available_episodes),
+        );
+        if let Some(anilist_id) = anilist_id {
+            let _ = db.link_provider_anilist(&sibling, anilist_id);
+        }
+        known.push((p, hit.provider_id));
+    }
+    known
+}
+
+/// Link every source's version of an AniList show from one aggregated search,
+/// and return the one to open.
+///
+/// The show to open is picked as before (a carried AniList id is exact;
+/// otherwise the best title match). What this adds is linking the *other*
+/// sources' matches too, so when the opened source later breaks, failover
+/// already knows where else the show lives. Those extra links use the strict
+/// same-season matcher: they are acted on without the user ever seeing them.
+pub fn link_matches(
+    db: &Database,
+    anilist_id: i64,
+    titles: &[&str],
+    episodes: Option<u32>,
+    results: &[AnimeSummary],
+) -> Option<AnimeSummary> {
+    let title = titles.first().copied().unwrap_or_default();
+    let exact = |pool: &[AnimeSummary]| -> Option<AnimeSummary> {
+        pool.iter()
+            .find(|c| c.anilist_id == Some(anilist_id))
+            .cloned()
+    };
+    let primary = exact(results)
+        .or_else(|| confident_provider_match(titles, episodes, results).cloned())
+        .or_else(|| best_provider_match(anilist_id, title, episodes, results).cloned())?;
+    // Linked first, so it becomes the preferred source for the show.
+    let _ = db.link_provider_anilist(&primary.provider_id, anilist_id);
+
+    let primary_source = SourceId::parse(&primary.provider_id).source;
+    let mut seen = vec![primary_source];
+    for r in results {
+        let source = SourceId::parse(&r.provider_id).source;
+        if seen.contains(&source) {
+            continue;
+        }
+        let pool: Vec<AnimeSummary> = results
+            .iter()
+            .filter(|c| SourceId::parse(&c.provider_id).source == source)
+            .cloned()
+            .collect();
+        if let Some(m) =
+            exact(&pool).or_else(|| confident_provider_match(titles, episodes, &pool).cloned())
+        {
+            let _ = db.link_provider_anilist(&m.provider_id, anilist_id);
+        }
+        seen.push(source);
+    }
+    Some(primary)
 }
 
 /// Sources enabled for this request. A source that cannot do dub is skipped
@@ -218,6 +362,8 @@ mod tests {
         dub: bool,
         fails: bool,
         hangs: bool,
+        /// Searches served, to prove a miss is not re-asked.
+        searches: std::sync::atomic::AtomicUsize,
     }
 
     impl Stub {
@@ -229,6 +375,7 @@ mod tests {
                 dub: true,
                 fails: false,
                 hangs: false,
+                searches: std::sync::atomic::AtomicUsize::new(0),
             }
         }
         fn hits(mut self, h: &[&'static str]) -> Self {
@@ -269,6 +416,8 @@ mod tests {
             }
         }
         async fn search(&self, _q: &str, _m: TranslationType) -> Result<Vec<AnimeSummary>> {
+            self.searches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if self.fails {
                 return Err(Error::Provider("boom".into()));
             }
@@ -289,6 +438,9 @@ mod tests {
                 .collect())
         }
         async fn episodes(&self, _s: &str, _m: TranslationType) -> Result<Vec<String>> {
+            if self.fails {
+                return Err(Error::Provider("down".into()));
+            }
             Ok(self.playable.iter().map(|e| e.to_string()).collect())
         }
         async fn sources(
@@ -521,9 +673,429 @@ mod tests {
             Stub::new("allanime").playable(&["1"]),
             Stub::new("hianime").playable(&["1", "2", "3"]),
         ]);
-        let got = episodes(&r, "hianime:h1", TranslationType::Sub)
+        let got = episodes(&r, &db(), "hianime:h1", TranslationType::Sub)
             .await
             .unwrap();
         assert_eq!(got, ["1", "2", "3"]);
+    }
+
+    // ---- failover for shows no other source was ever linked to ----
+
+    /// The show as the user opened it: cached under its owning source, with
+    /// the titles a search would have stored. Deliberately NOT linked to any
+    /// other source.
+    fn opened(db: &Database, show_id: &str, romaji: &str, english: Option<&str>) {
+        db.cache_anime(show_id, romaji, english, None, None)
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_unlinked_show_is_found_on_another_source_by_title() {
+        // The outage case that matters: allanime is down and the show was only
+        // ever opened from allanime.
+        let r = reg(vec![
+            Stub::new("allanime").failing(),
+            Stub::new("anizone").hits(&["Unrelated Show", "Sousou no Frieren"]),
+        ]);
+        let d = db();
+        opened(&d, "allanime:a1", "Sousou no Frieren", None);
+        let got = sources_for(&r, &d, "allanime:a1", "1", TranslationType::Sub)
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].source, "anizone");
+    }
+
+    #[tokio::test]
+    async fn discovery_tries_the_english_title_when_the_romaji_finds_nothing() {
+        // A source that indexes the show only under its English name.
+        struct EnglishOnly;
+        #[async_trait]
+        impl Provider for EnglishOnly {
+            fn id(&self) -> &'static str {
+                "animegg"
+            }
+            fn display_name(&self) -> &'static str {
+                "animegg"
+            }
+            fn capabilities(&self) -> Capabilities {
+                Capabilities {
+                    dub: true,
+                    carries_anilist_id: false,
+                    subtitles: false,
+                }
+            }
+            async fn search(&self, q: &str, _m: TranslationType) -> Result<Vec<AnimeSummary>> {
+                Ok(if q.contains("Beyond") {
+                    vec![AnimeSummary {
+                        provider_id: "frieren".into(),
+                        title: "Frieren: Beyond Journey's End".into(),
+                        title_english: None,
+                        cover_url: None,
+                        available_episodes: 28,
+                        anilist_id: None,
+                    }]
+                } else {
+                    vec![]
+                })
+            }
+            async fn episodes(&self, _s: &str, _m: TranslationType) -> Result<Vec<String>> {
+                Ok(vec!["1".into()])
+            }
+            async fn sources(
+                &self,
+                show: &str,
+                _e: &str,
+                _m: TranslationType,
+            ) -> Result<Vec<VideoSource>> {
+                Ok(vec![VideoSource {
+                    source: String::new(),
+                    provider_name: "gg".into(),
+                    quality: "720".into(),
+                    url: format!("https://gg/{show}.mp4"),
+                    kind: StreamKind::Mp4,
+                    referer: None,
+                    subtitles: vec![],
+                }])
+            }
+        }
+        let r = Registry::new(vec![
+            Arc::new(Stub::new("allanime").failing()) as Arc<dyn Provider>,
+            Arc::new(EnglishOnly),
+        ]);
+        let d = db();
+        opened(
+            &d,
+            "allanime:a1",
+            "Sousou no Frieren",
+            Some("Frieren: Beyond Journey's End"),
+        );
+        let got = sources_for(&r, &d, "allanime:a1", "1", TranslationType::Sub)
+            .await
+            .unwrap();
+        assert_eq!(got[0].url, "https://gg/frieren.mp4");
+    }
+
+    #[tokio::test]
+    async fn discovery_refuses_a_different_season() {
+        // Wrong video silently playing is worse than an honest failure.
+        let r = reg(vec![
+            Stub::new("allanime").failing(),
+            Stub::new("anizone").hits(&["Sousou no Frieren"]),
+        ]);
+        let d = db();
+        opened(&d, "allanime:a2", "Sousou no Frieren 2nd Season", None);
+        let err = sources_for(&r, &d, "allanime:a2", "1", TranslationType::Sub)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("rotated"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn a_discovered_sibling_is_linked_so_it_is_not_searched_for_again() {
+        let anizone = Arc::new(Stub::new("anizone").hits(&["Sousou no Frieren"]));
+        let r = Registry::new(vec![
+            Arc::new(Stub::new("allanime").failing()) as Arc<dyn Provider>,
+            anizone.clone(),
+        ]);
+        let d = db();
+        opened(&d, "allanime:a1", "Sousou no Frieren", None);
+        d.link_provider_anilist("allanime:a1", 154587).unwrap();
+
+        for _ in 0..3 {
+            sources_for(&r, &d, "allanime:a1", "1", TranslationType::Sub)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            anizone.searches.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+        // And the link is real: the show now lists both sources.
+        let linked = d.sources_for_anilist(154587).unwrap();
+        assert_eq!(
+            linked,
+            [
+                ("allanime".to_string(), "allanime:a1".to_string()),
+                (
+                    "anizone".to_string(),
+                    "anizone:Sousou no Frieren".to_string()
+                ),
+            ]
+        );
+        // allanime stays the preferred source: failover is not a re-pin.
+        assert_eq!(
+            d.provider_id_for_anilist(154587).unwrap().as_deref(),
+            Some("allanime:a1")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_source_without_the_show_is_not_re_searched_on_every_episode() {
+        let anizone = Arc::new(Stub::new("anizone").hits(&["Something Else"]));
+        let r = Registry::new(vec![
+            Arc::new(Stub::new("allanime").failing()) as Arc<dyn Provider>,
+            anizone.clone(),
+        ]);
+        let d = db();
+        opened(&d, "allanime:a1", "Sousou no Frieren", None);
+        for ep in ["1", "2", "3"] {
+            assert!(sources_for(&r, &d, "allanime:a1", ep, TranslationType::Sub)
+                .await
+                .is_err());
+        }
+        assert_eq!(
+            anizone.searches.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn a_healthy_source_never_triggers_discovery() {
+        let anizone = Arc::new(Stub::new("anizone").hits(&["Sousou no Frieren"]));
+        let r = Registry::new(vec![
+            Arc::new(Stub::new("allanime")) as Arc<dyn Provider>,
+            anizone.clone(),
+        ]);
+        let d = db();
+        opened(&d, "allanime:a1", "Sousou no Frieren", None);
+        sources_for(&r, &d, "allanime:a1", "1", TranslationType::Sub)
+            .await
+            .unwrap();
+        episodes(&r, &d, "allanime:a1", TranslationType::Sub)
+            .await
+            .unwrap();
+        assert_eq!(
+            anizone.searches.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn every_other_source_being_down_is_still_just_the_original_error() {
+        let r = reg(vec![
+            Stub::new("allanime").failing(),
+            Stub::new("anizone").failing(),
+            Stub::new("animegg").failing(),
+        ]);
+        let d = db();
+        opened(&d, "allanime:a1", "Sousou no Frieren", None);
+        let err = sources_for(&r, &d, "allanime:a1", "1", TranslationType::Sub)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("rotated"), "got {err}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hung_primary_fails_over_instead_of_hanging_playback() {
+        struct HungSources;
+        #[async_trait]
+        impl Provider for HungSources {
+            fn id(&self) -> &'static str {
+                "allanime"
+            }
+            fn display_name(&self) -> &'static str {
+                "allanime"
+            }
+            fn capabilities(&self) -> Capabilities {
+                Capabilities {
+                    dub: true,
+                    carries_anilist_id: true,
+                    subtitles: true,
+                }
+            }
+            async fn search(&self, _q: &str, _m: TranslationType) -> Result<Vec<AnimeSummary>> {
+                Ok(vec![])
+            }
+            async fn episodes(&self, _s: &str, _m: TranslationType) -> Result<Vec<String>> {
+                std::future::pending().await
+            }
+            async fn sources(
+                &self,
+                _s: &str,
+                _e: &str,
+                _m: TranslationType,
+            ) -> Result<Vec<VideoSource>> {
+                std::future::pending().await
+            }
+        }
+        let r = Registry::new(vec![
+            Arc::new(HungSources) as Arc<dyn Provider>,
+            Arc::new(Stub::new("anizone").playable(&["1", "2"])),
+        ]);
+        let d = db();
+        map(&d, 21, &[("allanime", "a1"), ("anizone", "z1")]);
+        let got = sources_for(&r, &d, "allanime:a1", "1", TranslationType::Sub)
+            .await
+            .unwrap();
+        assert_eq!(got[0].source, "anizone");
+        let eps = episodes(&r, &d, "allanime:a1", TranslationType::Sub)
+            .await
+            .unwrap();
+        assert_eq!(eps, ["1", "2"]);
+    }
+
+    #[tokio::test]
+    async fn the_episode_list_falls_across_when_its_source_is_down() {
+        // Without this the show page is a dead end before play is ever pressed.
+        let r = reg(vec![
+            Stub::new("allanime").failing(),
+            Stub::new("anizone")
+                .hits(&["Sousou no Frieren"])
+                .playable(&["1", "2", "3"]),
+        ]);
+        let d = db();
+        opened(&d, "allanime:a1", "Sousou no Frieren", None);
+        let got = episodes(&r, &d, "allanime:a1", TranslationType::Sub)
+            .await
+            .unwrap();
+        assert_eq!(got, ["1", "2", "3"]);
+    }
+
+    #[tokio::test]
+    async fn a_dead_show_page_with_no_alternative_reports_the_real_error() {
+        let r = reg(vec![Stub::new("allanime").failing()]);
+        let d = db();
+        opened(&d, "allanime:a1", "Sousou no Frieren", None);
+        let err = episodes(&r, &d, "allanime:a1", TranslationType::Sub)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("down"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn a_sub_only_source_hands_dub_requests_to_one_that_has_it() {
+        // Opened from a sub-only source, then the user flips to dub.
+        struct NoDub;
+        #[async_trait]
+        impl Provider for NoDub {
+            fn id(&self) -> &'static str {
+                "anizone"
+            }
+            fn display_name(&self) -> &'static str {
+                "anizone"
+            }
+            fn capabilities(&self) -> Capabilities {
+                Capabilities {
+                    dub: false,
+                    carries_anilist_id: false,
+                    subtitles: true,
+                }
+            }
+            async fn search(&self, _q: &str, _m: TranslationType) -> Result<Vec<AnimeSummary>> {
+                Ok(vec![])
+            }
+            async fn episodes(&self, _s: &str, _m: TranslationType) -> Result<Vec<String>> {
+                Ok(vec![])
+            }
+            async fn sources(
+                &self,
+                _s: &str,
+                _e: &str,
+                _m: TranslationType,
+            ) -> Result<Vec<VideoSource>> {
+                Ok(vec![])
+            }
+        }
+        let r = Registry::new(vec![
+            Arc::new(NoDub) as Arc<dyn Provider>,
+            Arc::new(Stub::new("animegg").hits(&["Sousou no Frieren"])),
+        ]);
+        let d = db();
+        opened(&d, "anizone:z1", "Sousou no Frieren", None);
+        let eps = episodes(&r, &d, "anizone:z1", TranslationType::Dub)
+            .await
+            .unwrap();
+        assert_eq!(eps, ["1"]);
+        let got = sources_for(&r, &d, "anizone:z1", "1", TranslationType::Dub)
+            .await
+            .unwrap();
+        assert_eq!(got[0].source, "animegg");
+    }
+
+    // ---- link_matches: one aggregated search links every source ----
+
+    fn hit(id: &str, title: &str, eps: u32, anilist_id: Option<i64>) -> AnimeSummary {
+        AnimeSummary {
+            provider_id: id.to_string(),
+            title: title.to_string(),
+            title_english: None,
+            cover_url: None,
+            available_episodes: eps,
+            anilist_id,
+        }
+    }
+
+    #[test]
+    fn link_matches_links_each_sources_version_of_the_show() {
+        let d = db();
+        let results = vec![
+            hit("allanime:a1", "Sousou no Frieren", 28, Some(154587)),
+            hit("anizone:z9", "Sousou no Frieren (2026)", 10, None),
+            hit("animegg:sousou-no-frieren", "Sousou no Frieren", 25, None),
+            hit("anizone:z1", "Sousou no Frieren", 28, None),
+        ];
+        for r in &results {
+            d.cache_anime(&r.provider_id, &r.title, None, None, None)
+                .unwrap();
+        }
+        let opened = link_matches(&d, 154587, &["Sousou no Frieren"], Some(28), &results).unwrap();
+        // The carried AniList id is exact, so allanime is what opens...
+        assert_eq!(opened.provider_id, "allanime:a1");
+        // ...and the other two are linked behind it, each to the right show.
+        let mut linked = d.sources_for_anilist(154587).unwrap();
+        linked.sort();
+        assert_eq!(
+            linked,
+            [
+                ("allanime".to_string(), "allanime:a1".to_string()),
+                (
+                    "animegg".to_string(),
+                    "animegg:sousou-no-frieren".to_string()
+                ),
+                ("anizone".to_string(), "anizone:z1".to_string()),
+            ]
+        );
+        assert_eq!(
+            d.provider_id_for_anilist(154587).unwrap().as_deref(),
+            Some("allanime:a1")
+        );
+    }
+
+    #[test]
+    fn link_matches_opens_another_source_when_the_usual_one_is_absent() {
+        // allanime contributed nothing to the search (down): the show must
+        // still open, from whoever has it.
+        let d = db();
+        let results = vec![
+            hit("anizone:z1", "Sousou no Frieren", 28, None),
+            hit("animegg:sousou-no-frieren", "Sousou no Frieren", 25, None),
+        ];
+        for r in &results {
+            d.cache_anime(&r.provider_id, &r.title, None, None, None)
+                .unwrap();
+        }
+        let opened = link_matches(&d, 154587, &["Sousou no Frieren"], Some(28), &results).unwrap();
+        assert_eq!(opened.provider_id, "anizone:z1");
+        assert_eq!(d.sources_for_anilist(154587).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn link_matches_does_not_link_a_lookalike_from_a_secondary_source() {
+        let d = db();
+        let results = vec![
+            hit("allanime:a1", "Attack on Titan", 25, Some(16498)),
+            hit("anizone:jh", "Attack on Titan: Junior High", 12, None),
+        ];
+        for r in &results {
+            d.cache_anime(&r.provider_id, &r.title, None, None, None)
+                .unwrap();
+        }
+        link_matches(&d, 16498, &["Attack on Titan"], Some(25), &results).unwrap();
+        assert_eq!(
+            d.sources_for_anilist(16498).unwrap(),
+            [("allanime".to_string(), "allanime:a1".to_string())]
+        );
+        assert!(link_matches(&d, 1, &["Nothing Like It"], None, &results).is_none());
     }
 }

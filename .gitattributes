@@ -1,0 +1,3 @@
+# Captured pages the parser tests read byte-for-byte: no line-ending
+# conversion, so they are identical on every platform.
+core/src/provider/*/fixtures/* -text

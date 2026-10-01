@@ -17,6 +17,8 @@ use anidoku_core::db::Database;
 use anidoku_core::downloads::{DownloadEvent, DownloadManager};
 use anidoku_core::media_server;
 use anidoku_core::provider::allanime::AllAnime;
+use anidoku_core::provider::animegg::AnimeGg;
+use anidoku_core::provider::anizone::AniZone;
 use anidoku_core::provider::{Provider, Registry};
 use anidoku_core::proxy::ProxyClient;
 use auth::AuthStore;
@@ -85,8 +87,13 @@ impl AppState {
         let auth = AuthStore::load(&data_dir);
         // Registration order is the default failover order; the user can
         // reorder or disable sources in Settings (persisted in app_settings).
+        // The three fail independently: allanime breaks when its request
+        // signing rotates, the other two only if their markup changes or the
+        // host is down.
         let sources = Arc::new(Registry::new(vec![
-            Arc::new(AllAnime::new()) as Arc<dyn Provider>
+            Arc::new(AllAnime::new()) as Arc<dyn Provider>,
+            Arc::new(AniZone::new()),
+            Arc::new(AnimeGg::new()),
         ]));
         let downloads_root = data_dir.join("downloads");
         std::fs::create_dir_all(&downloads_root).expect("create downloads dir");

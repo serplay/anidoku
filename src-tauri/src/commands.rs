@@ -11,7 +11,7 @@ use anidoku_core::models::{
     Notification, StreamKind, TranslationType, VideoSource, Viewer, WatchState,
 };
 use anidoku_core::provider::{aggregate, SourceStatus};
-use anidoku_core::sync::{best_match, best_provider_match};
+use anidoku_core::sync::best_match;
 use serde::Serialize;
 use std::time::Duration;
 #[cfg(target_os = "ios")]
@@ -77,7 +77,7 @@ pub async fn get_episodes(
     } else {
         TranslationType::Sub
     };
-    aggregate::episodes(&state.sources, &show_id, mode)
+    aggregate::episodes(&state.sources, &state.db, &show_id, mode)
         .await
         .map_err(map_err)
 }
@@ -932,11 +932,15 @@ pub async fn resolve_provider_for_anilist(
             Some(r.available_episodes),
         );
     }
-    let Some(m) = best_provider_match(anilist_id, &title, episodes, &results) else {
-        return Ok(None);
-    };
-    let _ = state.db.link_provider_anilist(&m.provider_id, anilist_id);
-    Ok(Some(m.clone()))
+    // Links every source that has the show (not just the one that opens), so
+    // failover has somewhere to go if this source later breaks.
+    Ok(aggregate::link_matches(
+        &state.db,
+        anilist_id,
+        &[&title],
+        episodes,
+        &results,
+    ))
 }
 
 /// Re-check a negative availability result after this many seconds (7 days).
@@ -982,13 +986,8 @@ pub async fn check_availability(
             Some(r.available_episodes),
         );
     }
-    let available = match best_provider_match(anilist_id, &title, episodes, &results) {
-        Some(m) => {
-            let _ = state.db.link_provider_anilist(&m.provider_id, anilist_id);
-            true
-        }
-        None => false,
-    };
+    let available =
+        aggregate::link_matches(&state.db, anilist_id, &[&title], episodes, &results).is_some();
     mark_available(&state, anilist_id, available);
     Ok(available)
 }

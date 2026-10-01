@@ -16,6 +16,12 @@ pub fn normalize(title: &str) -> String {
     let lower = title.to_lowercase();
     let mut cleaned = String::with_capacity(lower.len());
     for ch in lower.chars() {
+        // Apostrophes join rather than split ("Journey's" must equal the
+        // "Journeys" a slug-derived title gives); one source writes them as a
+        // backtick.
+        if matches!(ch, '\'' | '\u{2019}' | '`') {
+            continue;
+        }
         if ch.is_alphanumeric() || ch.is_whitespace() {
             cleaned.push(ch);
         } else {
@@ -150,9 +156,213 @@ pub fn best_provider_match<'a>(
         .map(|(c, _)| c)
 }
 
+/// Which instalment of a franchise a title names: `Some(2)` for "… 2nd
+/// Season", "… Season 2", "… Part 2", "… II", or a bare trailing "… 2".
+/// `None` when the title carries no such marker (a first season, usually).
+///
+/// [`normalize`] deliberately throws this away so a sequel still *finds* its
+/// franchise; this recovers it for the callers that must not confuse seasons.
+pub fn season_marker(title: &str) -> Option<u32> {
+    let lower = title.to_lowercase();
+    let cleaned: String = lower
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect();
+    let tokens: Vec<&str> = cleaned.split_whitespace().collect();
+    let ordinal = |t: &str| -> Option<u32> {
+        ["st", "nd", "rd", "th"]
+            .iter()
+            .find_map(|suffix| t.strip_suffix(suffix))
+            .and_then(|n| n.parse::<u32>().ok())
+            .filter(|n| (1..=20).contains(n))
+    };
+    let small = |t: &str| t.parse::<u32>().ok().filter(|n| (1..=20).contains(n));
+    for (i, t) in tokens.iter().enumerate() {
+        let next = tokens.get(i + 1).copied();
+        match *t {
+            // "season 2", "part 2", "cour 2"
+            "season" | "part" | "cour" => {
+                if let Some(n) = next.and_then(small) {
+                    return Some(n);
+                }
+            }
+            _ => {}
+        }
+        // "2nd season"
+        if next == Some("season") {
+            if let Some(n) = ordinal(t) {
+                return Some(n);
+            }
+        }
+    }
+    // A trailing roman numeral or bare small number ("Title II", "Title 2").
+    // Only when it is not the whole title ("86", "II" are names, not markers).
+    if tokens.len() > 1 {
+        match *tokens.last()? {
+            "ii" => return Some(2),
+            "iii" => return Some(3),
+            "iv" => return Some(4),
+            last => {
+                if let Some(n) = small(last).filter(|n| *n >= 2 && *n <= 9) {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Minimum title similarity for [`confident_provider_match`]. Well above
+/// `best_provider_match`'s threshold: this match is acted on without the user
+/// seeing a list to pick from, so a near miss must fail closed.
+pub const CONFIDENT_THRESHOLD: f64 = 0.8;
+
+/// Pick the provider show that is *the same show* as the given titles, or
+/// nothing. Used where a wrong match is worse than no match: linking a second
+/// source to a show for failover, where the user never sees the candidates.
+///
+/// Stricter than [`best_provider_match`] in two ways: the title must be a
+/// near-exact match under any of the known titles, and both sides must name
+/// the same season — which plain similarity cannot tell apart, because
+/// [`normalize`] strips season words. Episode counts only break ties: sources
+/// routinely have fewer episodes than a show's nominal count.
+pub fn confident_provider_match<'a>(
+    titles: &[&str],
+    episodes: Option<u32>,
+    candidates: &'a [AnimeSummary],
+) -> Option<&'a AnimeSummary> {
+    let titles: Vec<&str> = titles
+        .iter()
+        .copied()
+        .filter(|t| !t.trim().is_empty())
+        .collect();
+    let mut best: Option<(&AnimeSummary, f64)> = None;
+    for c in candidates {
+        let candidate_titles: Vec<&str> = std::iter::once(c.title.as_str())
+            .chain(c.title_english.as_deref())
+            .collect();
+        let mut score = 0.0_f64;
+        for q in &titles {
+            for t in &candidate_titles {
+                // A pairing only counts when both name the same instalment.
+                if season_marker(q).unwrap_or(1) == season_marker(t).unwrap_or(1) {
+                    score = score.max(similarity(q, t));
+                }
+            }
+        }
+        if score < CONFIDENT_THRESHOLD {
+            continue;
+        }
+        if episodes.is_some_and(|q| q > 0 && q == c.available_episodes) {
+            score += 0.1;
+        }
+        if best.is_none_or(|(_, s)| score > s) {
+            best = Some((c, score));
+        }
+    }
+    best.map(|(c, _)| c)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn season_marker_reads_the_common_sequel_spellings() {
+        assert_eq!(season_marker("Sousou no Frieren"), None);
+        assert_eq!(season_marker("Sousou no Frieren 2nd Season"), Some(2));
+        assert_eq!(
+            season_marker("Frieren: Beyond Journey's End Season 2"),
+            Some(2)
+        );
+        assert_eq!(season_marker("Kaguya-sama: Love is War Part 3"), Some(3));
+        assert_eq!(season_marker("Overlord II"), Some(2));
+        assert_eq!(season_marker("Overlord IV"), Some(4));
+        assert_eq!(season_marker("Mob Psycho 100 III"), Some(3));
+        assert_eq!(season_marker("Spy x Family 2"), Some(2));
+        // Numbers that are part of the name are not markers.
+        assert_eq!(season_marker("86"), None);
+        assert_eq!(season_marker("Mob Psycho 100"), None);
+        assert_eq!(season_marker("91 Days"), None);
+        assert_eq!(season_marker("Steins;Gate 0"), None);
+    }
+
+    #[test]
+    fn normalize_joins_apostrophes() {
+        assert_eq!(
+            normalize("Frieren: Beyond Journey's End"),
+            normalize("Frieren beyond journeys end")
+        );
+        assert_eq!(
+            normalize("Frieren: Beyond Journey`s End"),
+            normalize("Frieren: Beyond Journey\u{2019}s End")
+        );
+    }
+
+    #[test]
+    fn confident_match_takes_the_same_show_under_any_known_title() {
+        let cands = vec![
+            summary("other", "Sousou no Frieren: Mini Anime", 20, None),
+            AnimeSummary {
+                title_english: Some("Frieren: Beyond Journey`s End".into()),
+                ..summary("s1", "Sousou no Frieren", 28, None)
+            },
+        ];
+        let m = confident_provider_match(&["Sousou no Frieren"], Some(28), &cands).unwrap();
+        assert_eq!(m.provider_id, "s1");
+        // Only the English title is known: still found, via the candidate's.
+        let m = confident_provider_match(&["Frieren: Beyond Journey's End"], None, &cands).unwrap();
+        assert_eq!(m.provider_id, "s1");
+    }
+
+    #[test]
+    fn confident_match_never_crosses_seasons() {
+        // Similarity alone scores these 1.0 (season words are noise to it).
+        let s1_only = vec![summary("s1", "Sousou no Frieren", 28, None)];
+        assert!(
+            confident_provider_match(&["Sousou no Frieren 2nd Season"], Some(10), &s1_only)
+                .is_none()
+        );
+        let both = vec![
+            summary("s1", "Sousou no Frieren", 28, None),
+            summary("s2", "Frieren beyond journeys end season 2", 10, None),
+        ];
+        let m = confident_provider_match(
+            &[
+                "Sousou no Frieren 2nd Season",
+                "Frieren: Beyond Journey's End Season 2",
+            ],
+            Some(10),
+            &both,
+        )
+        .unwrap();
+        assert_eq!(m.provider_id, "s2");
+        let m = confident_provider_match(&["Sousou no Frieren"], Some(28), &both).unwrap();
+        assert_eq!(m.provider_id, "s1");
+    }
+
+    #[test]
+    fn confident_match_fails_closed_on_a_near_miss() {
+        // Clears best_provider_match's loose threshold, but is another show.
+        let cands = vec![summary("p", "Attack on Titan: Junior High", 12, None)];
+        assert!(best_provider_match(1, "Attack on Titan", None, &cands).is_some());
+        assert!(confident_provider_match(&["Attack on Titan"], None, &cands).is_none());
+        assert!(confident_provider_match(&[], None, &cands).is_none());
+        assert!(confident_provider_match(&["", "  "], None, &cands).is_none());
+    }
+
+    #[test]
+    fn confident_match_breaks_ties_on_episode_count_only() {
+        let cands = vec![
+            summary("short", "Hunter x Hunter", 62, None),
+            summary("long", "Hunter x Hunter", 148, None),
+        ];
+        let m = confident_provider_match(&["Hunter x Hunter"], Some(148), &cands).unwrap();
+        assert_eq!(m.provider_id, "long");
+        // A count mismatch alone does not disqualify: sources have gaps.
+        let partial = vec![summary("gg", "Sousou no Frieren", 25, None)];
+        assert!(confident_provider_match(&["Sousou no Frieren"], Some(28), &partial).is_some());
+    }
 
     fn summary(provider_id: &str, title: &str, eps: u32, anilist_id: Option<i64>) -> AnimeSummary {
         AnimeSummary {

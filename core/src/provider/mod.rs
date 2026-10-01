@@ -1,8 +1,13 @@
 pub mod aggregate;
 pub mod allanime;
+pub mod animegg;
+pub mod anizone;
 pub mod id;
 pub mod rank;
 pub mod registry;
+mod scrape;
+#[cfg(test)]
+pub(crate) mod testutil;
 
 pub use id::SourceId;
 pub use rank::playability_rank;

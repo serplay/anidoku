@@ -11,7 +11,9 @@
 
 use super::Provider;
 use crate::db::Database;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// `app_settings` key holding the comma-separated failover order.
 pub const ORDER_KEY: &str = "source_order";
@@ -20,14 +22,43 @@ pub const ORDER_KEY: &str = "source_order";
 /// default for existing installs.
 pub const DISABLED_KEY: &str = "sources_disabled";
 
+/// How long a "this source doesn't have that show" result is trusted before
+/// the source is asked again. Long enough that an outage doesn't re-search a
+/// source on every episode, short enough that a show a source adds later (or a
+/// source that was merely down) is picked up within a session.
+pub const MISS_TTL: Duration = Duration::from_secs(30 * 60);
+
 pub struct Registry {
     sources: Vec<Arc<dyn Provider>>,
+    /// (show id, source) pairs where a failover lookup recently found nothing.
+    /// In memory on purpose: a miss is a fact about now, not about the show.
+    misses: Mutex<HashMap<(String, String), Instant>>,
 }
 
 impl Registry {
     /// Registration order doubles as the default failover order.
     pub fn new(sources: Vec<Arc<dyn Provider>>) -> Self {
-        Self { sources }
+        Self {
+            sources,
+            misses: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Remember that `source` had no match for `show_id` just now.
+    pub fn note_miss(&self, show_id: &str, source: &str) {
+        if let Ok(mut misses) = self.misses.lock() {
+            misses.retain(|_, at| at.elapsed() < MISS_TTL);
+            misses.insert((show_id.to_string(), source.to_string()), Instant::now());
+        }
+    }
+
+    /// Whether `source` was asked for `show_id` recently and had nothing.
+    pub fn recently_missed(&self, show_id: &str, source: &str) -> bool {
+        self.misses.lock().is_ok_and(|misses| {
+            misses
+                .get(&(show_id.to_string(), source.to_string()))
+                .is_some_and(|at| at.elapsed() < MISS_TTL)
+        })
     }
 
     pub fn all(&self) -> &[Arc<dyn Provider>] {
@@ -205,6 +236,17 @@ mod tests {
             ids(&r.enabled_ordered(&db)),
             ["hianime", "allanime", "animepahe"]
         );
+    }
+
+    #[test]
+    fn a_miss_is_remembered_per_show_and_source() {
+        let r = registry();
+        assert!(!r.recently_missed("allanime:a1", "hianime"));
+        r.note_miss("allanime:a1", "hianime");
+        assert!(r.recently_missed("allanime:a1", "hianime"));
+        // Neither another source nor another show is affected.
+        assert!(!r.recently_missed("allanime:a1", "animepahe"));
+        assert!(!r.recently_missed("allanime:a2", "hianime"));
     }
 
     #[test]
