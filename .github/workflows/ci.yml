@@ -15,8 +15,10 @@ env:
 
 jobs:
   # Fast, dependency-light gate on the pure-Rust core: format, lint, and the
-  # full unit-test suite (the live network test is #[ignore]d and runs only in
-  # the scheduled provider-health workflow).
+  # full unit-test suite (the live network tests are #[ignore]d and run only in
+  # the scheduled provider-health workflow). Scoped to the core crate on
+  # purpose: the app crate needs the system webkit/GTK libraries, which this
+  # job does not install — the app is linted and tested in `tauri-check`.
   core:
     name: core (fmt · clippy · test)
     runs-on: ubuntu-latest
@@ -30,12 +32,10 @@ jobs:
           workspaces: . -> target
       - name: rustfmt
         run: cargo fmt --all -- --check
-      # Workspace-wide: src-tauri was only ever cargo check'd, so its lints
-      # were unenforced and its tests never ran.
       - name: clippy (deny warnings)
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy -p anidoku-core --all-targets -- -D warnings
       - name: test
-        run: cargo test --workspace
+        run: cargo test -p anidoku-core
 
   # The Svelte/TypeScript frontend: type + template checks.
   frontend:
@@ -99,10 +99,12 @@ jobs:
           npm run -s oracle:apply
           git diff --exit-code -- core/src/provider/allanime/constants.rs
 
-  # Compile-check the full Tauri desktop app (pulls in the system webkit deps).
-  # Check-only — a full bundle isn't needed to catch breakage on the Rust side.
+  # Lint and test the full Tauri desktop app (pulls in the system webkit deps).
+  # No bundle — that isn't needed to catch breakage on the Rust side. This is
+  # the only job with the system libraries installed, so the workspace-wide
+  # clippy and the app crate's own tests live here rather than in `core`.
   tauri-check:
-    name: tauri app (cargo check)
+    name: tauri app (clippy · test)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -119,8 +121,12 @@ jobs:
             file \
             libssl-dev
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: . -> target
-      - name: cargo check (workspace)
-        run: cargo check --workspace --all-targets
+      - name: clippy (workspace, deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: test (app crate)
+        run: cargo test -p anidoku

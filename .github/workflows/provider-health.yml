@@ -19,6 +19,11 @@ name: Provider health
 #   report     one issue per outage with a status block updated in place
 #              (no per-run comments), comments only on state change, auto-close
 #              on recovery, and a nudge for stale provider-health PRs.
+#   sources    the other sources (AniZone, AnimeGG) have nothing that rotates,
+#              so there is no auto-port for them: each gets a live walk
+#              (search → episodes → sources → first bytes of media) and its own
+#              issue. One source down is a warning — the app fails over. Every
+#              source down at once is the outage, and is labelled as such.
 #
 # Drill: dispatch with simulate_rotation=true to exercise the whole path with a
 # bogus build_id without waiting for allanime to rotate.
@@ -142,6 +147,55 @@ jobs:
         with:
           name: live-logs
           path: live-*.log
+          retention-days: 14
+
+  sources:
+    name: ${{ matrix.source }} live sources
+    if: ${{ !inputs.simulate_rotation }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        source: [anizone, animegg]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: . -> target
+      - name: Build the live test once
+        run: cargo test -p anidoku-core --test sources_live --no-run
+      # Never fails the job: the verdict travels to the report job as an
+      # artifact, so one flaky source can't hide the others' results.
+      - name: Live test (retry once)
+        env:
+          SOURCE: ${{ matrix.source }}
+        run: |
+          run() {
+            set -o pipefail
+            cargo test -p anidoku-core --test sources_live "live_$SOURCE" -- --ignored --nocapture --test-threads=1 2>&1 | tee "live-$SOURCE.log"
+          }
+          result=fail
+          if run; then result=ok
+          else
+            echo "failed — retrying once in 3 minutes"; sleep 180
+            if run; then result=ok; fi
+          fi
+          reason=""
+          if [ "$result" = fail ]; then
+            reason=$(grep -Eo "(search|episodes|sources|media): .*" "live-$SOURCE.log" | head -1 | cut -c1-300 || true)
+            [ -n "$reason" ] || reason=$(grep -Eo "panicked at .*" "live-$SOURCE.log" | head -1 | cut -c1-300 || true)
+          fi
+          jq -n --arg source "$SOURCE" --arg result "$result" --arg reason "$reason" \
+            '{source: $source, result: $result, reason: $reason}' > "result-$SOURCE.json"
+          cat "result-$SOURCE.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: source-result-${{ matrix.source }}
+          path: |
+            result-${{ matrix.source }}.json
+            live-${{ matrix.source }}.log
           retention-days: 14
 
   auto-port:
@@ -410,3 +464,119 @@ jobs:
             }
 
             if (RESULT !== "ok") core.setFailed(`provider health: ${CLASS} — ${REASON || "see log"}`);
+
+  report-sources:
+    name: report (other sources)
+    needs: [live, sources]
+    if: always() && !inputs.simulate_rotation && needs.sources.result != 'cancelled'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: source-result-*
+          merge-multiple: true
+          path: results
+      - uses: actions/github-script@v7
+        env:
+          ALLANIME: ${{ needs.live.outputs.result }}
+        with:
+          script: |
+            const fs = require("fs");
+            const { owner, repo } = context.repo;
+            const runUrl = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const now = new Date().toISOString();
+            const LABEL = "source-health";
+            const ALL_DOWN = "all-sources-down";
+            const NAMES = { anizone: "AniZone", animegg: "AnimeGG" };
+
+            // A leg that crashed before writing its verdict counts as failing:
+            // "no result" must never read as "healthy".
+            const results = Object.keys(NAMES).map((source) => {
+              try { return JSON.parse(fs.readFileSync(`results/result-${source}.json`, "utf8")); }
+              catch { return { source, result: "fail", reason: "the health job produced no result (see run log)" }; }
+            });
+            const allanimeOk = process.env.ALLANIME === "ok";
+            const allDown = !allanimeOk && results.every((r) => r.result !== "ok");
+
+            async function ensureLabel(name, color, description) {
+              try { await github.rest.issues.createLabel({ owner, repo, name, color, description }); }
+              catch (e) { if (e.status !== 422) throw e; }
+            }
+            await ensureLabel(LABEL, "fbca04", "Scheduled live test of a non-allanime source");
+            await ensureLabel(ALL_DOWN, "b60205", "Every streaming source is failing — the app cannot play anything");
+
+            const open = (await github.rest.issues.listForRepo({ owner, repo, state: "open", labels: LABEL, per_page: 30 }))
+              .data.filter((i) => !i.pull_request);
+
+            const failing = [];
+            for (const r of results) {
+              const name = NAMES[r.source];
+              const title = `⚠️ ${name} source health check failing`;
+              const issue = open.find((i) => i.title === title);
+
+              if (r.result === "ok") {
+                if (issue) {
+                  await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
+                    body: `✅ Recovered — the ${name} live test passed in [this run](${runUrl}) at ${now}.` });
+                  await github.rest.issues.update({ owner, repo, issue_number: issue.number, state: "closed", state_reason: "completed" });
+                }
+                continue;
+              }
+              failing.push(name);
+
+              const others = [`AllAnime ${allanimeOk ? "✅" : "❌"}`]
+                .concat(results.filter((o) => o.source !== r.source).map((o) => `${NAMES[o.source]} ${o.result === "ok" ? "✅" : "❌"}`))
+                .join(" · ");
+              const reason = (r.reason || "see run log").replace(/`/g, "'");
+              const stage = reason.split(":")[0];
+              const block = [
+                "<!-- health-status -->",
+                `<!-- state:${stage}|${allDown} -->`,
+                "### Status",
+                `| | |`, `|---|---|`,
+                `| Last check | ${now} ([run](${runUrl})) |`,
+                `| Failing stage | \`${reason}\` |`,
+                `| Other sources | ${others} |`,
+                `| Impact | ${allDown ? "**every source is down — nothing can be played**" : "none while another source is up: the app fails over automatically"} |`,
+                "<!-- /health-status -->",
+              ].join("\n");
+              const intro = [
+                `The scheduled live test of **${name}** is failing (twice in a row, three minutes apart).`,
+                "This issue is updated **in place** on every 6-hourly run; comments are added only when",
+                "the failing stage changes, and it closes itself on recovery.",
+                "",
+                `${name} has no rotating config, so there is no automatic fix: the stage above says where`,
+                `the scraper stopped. \`page layout changed\` means the markup moved and`,
+                `\`core/src/provider/${r.source}/parse.rs\` needs updating (re-capture the fixtures next to it);`,
+                "an HTTP or network error usually means the site itself is down or has moved domain.",
+                "",
+                "```sh",
+                `cargo test -p anidoku-core --test sources_live live_${r.source} -- --ignored --nocapture`,
+                "```",
+                "",
+              ].join("\n");
+
+              if (!issue) {
+                await github.rest.issues.create({ owner, repo, title, body: intro + block,
+                  labels: allDown ? [LABEL, ALL_DOWN] : [LABEL] });
+                continue;
+              }
+              const prev = (issue.body || "").match(/<!-- state:(.*?) -->/)?.[1];
+              const body = /<!-- health-status -->[\s\S]*<!-- \/health-status -->/.test(issue.body || "")
+                ? issue.body.replace(/<!-- health-status -->[\s\S]*<!-- \/health-status -->/, block)
+                : `${issue.body || ""}\n\n${block}`;
+              await github.rest.issues.update({ owner, repo, issue_number: issue.number, body });
+              if (prev !== `${stage}|${allDown}`) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: issue.number,
+                  body: `State changed → \`${reason}\`${allDown ? " — **every source is now down**" : ""}\n\nRun: ${runUrl}` });
+              }
+              const hasAllDown = issue.labels.some((l) => l.name === ALL_DOWN);
+              if (allDown && !hasAllDown) await github.rest.issues.addLabels({ owner, repo, issue_number: issue.number, labels: [ALL_DOWN] });
+              if (!allDown && hasAllDown) await github.rest.issues.removeLabel({ owner, repo, issue_number: issue.number, name: ALL_DOWN }).catch(() => {});
+            }
+
+            if (allDown) core.setFailed("ALL SOURCES DOWN: allanime and every other source failed their live tests");
+            else if (failing.length) core.setFailed(`source health: ${failing.join(", ")} failing (the app fails over to the remaining sources)`);
+            else core.info("all other sources healthy");
