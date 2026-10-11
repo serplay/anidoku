@@ -32,7 +32,13 @@ const BASE_URL: &str = "https://anizone.to";
 const USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0";
 /// Per-request ceiling, so one stalled connection can't hang a whole listing.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// The site is slow rather than down at times: Livewire calls routinely take
+/// 10-13s, and uncached search pages have crossed 10s from CI runners.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+/// Overall budget for listing a show, first page included. Kept under the
+/// aggregate's `EPISODES_TIMEOUT`, which would otherwise cancel the listing
+/// mid-paging and discard the episodes already in hand.
+const EPISODES_BUDGET: Duration = Duration::from_secs(38);
 /// The show page inlines 24 episodes; the rest arrive 24 at a time. This caps
 /// a runaway cursor loop at ~2400 episodes, comfortably past the longest show.
 const MAX_EPISODE_PAGES: usize = 100;
@@ -44,6 +50,7 @@ pub struct AniZone {
     client: Client,
     base_url: String,
     episodes: TtlCache<Vec<String>>,
+    episodes_budget: Duration,
 }
 
 impl Default for AniZone {
@@ -71,6 +78,7 @@ impl AniZone {
                 .expect("reqwest client"),
             base_url: base_url.into().trim_end_matches('/').to_string(),
             episodes: TtlCache::new(EPISODES_TTL),
+            episodes_budget: EPISODES_BUDGET,
         }
     }
 
@@ -102,8 +110,9 @@ impl AniZone {
     /// Fetch the episode pages after the first through Livewire's `loadPage`.
     ///
     /// Best-effort by design: the first 24 episodes are already in hand, so a
-    /// failure here (expired token, changed component) returns what has been
-    /// collected rather than failing the whole listing.
+    /// failure here (expired token, changed component, `deadline` passed)
+    /// returns what has been collected rather than failing the whole listing.
+    /// Returns whether the list is complete.
     async fn load_more_episodes(
         &self,
         show_id: &str,
@@ -111,10 +120,11 @@ impl AniZone {
         cookies: &str,
         mut cursor: String,
         episodes: &mut Vec<String>,
-    ) {
+        deadline: tokio::time::Instant,
+    ) -> bool {
         let Some(ctx) = parse::parse_livewire_context(html, show_id) else {
             eprintln!("[anizone] episodes: no livewire context; list truncated");
-            return;
+            return false;
         };
         let mut snapshot = ctx.snapshot;
         for _ in 0..MAX_EPISODE_PAGES {
@@ -140,22 +150,26 @@ impl AniZone {
                     .text()
                     .await?;
                 parse::parse_livewire_page(&text)
-            }
-            .await;
-            let page = match page {
-                Ok(p) => p,
-                Err(e) => {
+            };
+            let page = match tokio::time::timeout_at(deadline, page).await {
+                Ok(Ok(p)) => p,
+                Ok(Err(e)) => {
                     eprintln!("[anizone] episodes: paging stopped early: {e}");
-                    return;
+                    return false;
+                }
+                Err(_) => {
+                    eprintln!("[anizone] episodes: paging out of time; list truncated");
+                    return false;
                 }
             };
             episodes.extend(page.page.episodes);
             snapshot = page.snapshot;
             match page.page.next_cursor {
                 Some(next) => cursor = next,
-                None => return,
+                None => return true,
             }
         }
+        false
     }
 }
 
@@ -197,16 +211,24 @@ impl Provider for AniZone {
         if let Some(cached) = self.episodes.get(show_id) {
             return Ok(cached);
         }
+        let deadline = tokio::time::Instant::now() + self.episodes_budget;
         let url = format!("{}/anime/{}", self.base_url, urlencoding::encode(show_id));
         let (html, cookies) = self.get_page(&url, "episodes").await?;
         let first = parse::parse_episode_page(&html)?;
         let mut episodes = first.episodes;
-        if let Some(cursor) = first.next_cursor {
-            self.load_more_episodes(show_id, &html, &cookies, cursor, &mut episodes)
-                .await;
-        }
+        let complete = match first.next_cursor {
+            Some(cursor) => {
+                self.load_more_episodes(show_id, &html, &cookies, cursor, &mut episodes, deadline)
+                    .await
+            }
+            None => true,
+        };
         episodes.dedup();
-        self.episodes.put(show_id, episodes.clone());
+        // A truncated list is still worth returning, but not worth pinning for
+        // the cache's lifetime: the next listing gets another try at the rest.
+        if complete {
+            self.episodes.put(show_id, episodes.clone());
+        }
         Ok(episodes)
     }
 
@@ -330,6 +352,33 @@ mod tests {
         let p = AniZone::with_base_url(&server.base);
         let eps = p.episodes("mdkytdqp", TranslationType::Sub).await.unwrap();
         assert_eq!(eps.len(), 24);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn slow_paging_keeps_the_first_page_and_retries_next_time() {
+        let server = serve(|req| {
+            if req.method == "POST" {
+                std::thread::sleep(Duration::from_millis(1500));
+                (200, LIVEWIRE.to_string())
+            } else {
+                (200, ANIME.to_string())
+            }
+        })
+        .await;
+        let mut p = AniZone::with_base_url(&server.base);
+        p.episodes_budget = Duration::from_millis(500);
+        let eps = p.episodes("mdkytdqp", TranslationType::Sub).await.unwrap();
+        assert_eq!(eps.len(), 24);
+        // Truncated, so not cached: the next listing goes back to the site.
+        let after_first = server.hits();
+        p.episodes("mdkytdqp", TranslationType::Sub).await.unwrap();
+        assert!(server.hits() > after_first, "a truncated list was cached");
+    }
+
+    #[test]
+    fn the_listing_budget_fits_inside_the_aggregate_ceiling() {
+        assert!(EPISODES_BUDGET < crate::provider::aggregate::EPISODES_TIMEOUT);
+        assert!(REQUEST_TIMEOUT < EPISODES_BUDGET);
     }
 
     #[tokio::test]
