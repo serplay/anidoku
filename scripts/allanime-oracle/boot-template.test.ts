@@ -41,6 +41,14 @@ test('buildId 177 — slash-joined, key_group first again (2026-10-01)', () => {
 	assert.equal(t.template, '{key_group}/{lane}/{referer_host}/{build_id}/{epoch}');
 });
 
+test('buildId 182 — dot-joined, the separator also inside referer_host (2026-10-26)', () => {
+	// A plain split('.') tears mkissa.to in two and nothing fits (issue #15).
+	const t = deriveBootTemplate('mkissa.to.182.mkissa.2964.k7', KNOWN('182', '2964'));
+	assert.equal(t.separator, '.');
+	assert.equal(t.key_group, 'mkissa');
+	assert.equal(t.template, '{referer_host}.{build_id}.{key_group}.{epoch}.{lane}');
+});
+
 test('a separator never seen before is inferred, not guessed from a list', () => {
 	const t = deriveBootTemplate('k7§2960§mkissa.to§mkissa§174', KNOWN('174', '2960'));
 	assert.equal(t.separator, '§');

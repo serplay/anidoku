@@ -103,7 +103,7 @@ pub const API_URL: &str = "https://api.mkissa.net/api";
 /// crypto bundle: `qf = (ta(..)+ta(..)) !== "string" ? "86" : ""`). Rotates
 /// often — 63 (mid-Jul), 75 (2026-07-30), 81 (2026-08-02), 86 (2026-08-05),
 /// 92 (2026-08-07), 166 (2026-09-09), 174 (2026-09-18), 177 (2026-10-01).
-pub const BUILD_ID: &str = "177";
+pub const BUILD_ID: &str = "182";
 
 /// Per-epoch key bootstrap endpoint (base; the `?buildId=&k=<lane>` query is
 /// built at call time). Returns `{"epoch":<int>,"partB":<b64>,"switchAt":..}`;
@@ -131,7 +131,7 @@ pub const REFERER_HOST: &str = "mkissa.to";
 /// Label prefixing the buildId in the `x-aa-boot` inner-key derivation:
 /// `inner = HMAC(mask, BOOT_LABEL + buildId)`. Was `aa-boot:` until 2026-09;
 /// it is now an opaque rotating string, so it lives in the config too.
-pub const BOOT_LABEL: &str = "I5AgJjIcVH:";
+pub const BOOT_LABEL: &str = "UCCk4NP:";
 
 /// Template for the `x-aa-boot` outer signature. Placeholders `{build_id}`,
 /// `{key_group}`, `{referer_host}`, `{epoch}`, `{lane}` are substituted at
@@ -141,10 +141,12 @@ pub const BOOT_LABEL: &str = "I5AgJjIcVH:";
 /// `{build_id}:{key_group}:{referer_host}:{epoch}:{lane}` (until 2026-09),
 /// `{key_group}:{lane}:{epoch}:{referer_host}:{build_id}` (buildId 166),
 /// `{build_id}+{lane}+{epoch}+{referer_host}+{key_group}` (buildId 174),
-/// `{key_group}/{lane}/{referer_host}/{build_id}/{epoch}` (buildId 177).
+/// `{key_group}/{lane}/{referer_host}/{build_id}/{epoch}` (buildId 177),
+/// `{referer_host}.{build_id}.{key_group}.{epoch}.{lane}` (buildId 182 — the
+/// separator also occurs inside `mkissa.to`, issue #15).
 /// Nothing may assume ':' — that assumption in the oracle cost a 4.5-day
 /// outage (issue #6); see scripts/allanime-oracle/boot-template.ts.
-pub const BOOT_SIG_TEMPLATE: &str = "{key_group}/{lane}/{referer_host}/{build_id}/{epoch}";
+pub const BOOT_SIG_TEMPLATE: &str = "{referer_host}.{build_id}.{key_group}.{epoch}.{lane}";
 
 /// Template for the aaReq nonce seed (`SHA-256(seed)[..12]`). Placeholders
 /// `{epoch}`, `{build_id}`, `{qh}`, `{ts}`, `{lane}`. Unchanged so far; made
@@ -160,7 +162,7 @@ pub const EPOCH_BUCKET_MS: u128 = 604_800_000;
 /// Static mask XORed with the bootstrap `partB` to derive the AES-256 key, and
 /// HMAC-keyed for `x-aa-boot`. The web client computes it as `ev(buildId)` (was
 /// `Fh`) over an embedded `ad` byte-array, so it rotates with `BUILD_ID`.
-pub const QD_MASK_HEX: &str = "b1ca68cba9ce7464fd20e16233502556680eaee5a169cf3b6ebbf70f42b7ccc9";
+pub const QD_MASK_HEX: &str = "3b39c164fc7fafeebc0d766575f8930b09f50354e71084906034f1947a6ad1c6";
 
 /// The `episode(...)` sources GraphQL query we send.
 ///

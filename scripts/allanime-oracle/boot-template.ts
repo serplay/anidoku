@@ -36,26 +36,47 @@ function candidateSeparators(outerData: string, known: Array<[string, string]>):
 	return [...new Set([...inferred, ...FALLBACK_SEPARATORS])];
 }
 
-/** Try one separator. Returns null when the split doesn't fit the shape. */
+/**
+ * Try one separator. Returns null when the split doesn't fit the shape.
+ *
+ * A known value may itself contain the separator: on 2026-10-26 allanime
+ * moved to `mkissa.to.182.mkissa.2964.k7`, where a plain `split('.')` tears
+ * `mkissa.to` in two (issue #15). So a field may span several adjacent parts,
+ * and we backtrack over the ways to group them. The key_group stays a single
+ * part — letting it span too would make every split ambiguous.
+ */
 function tokenise(outerData: string, known: Array<[string, string]>, sep: string): BootTemplate | null {
 	const parts = outerData.split(sep);
-	// Exactly the known fields plus one key_group, each field used once.
-	if (parts.length !== known.length + 1) return null;
+	if (parts.length < known.length + 1) return null;
 	const used = new Set<string>();
-	const unknown: string[] = [];
-	const tpl = parts.map((p) => {
-		const hit = known.find(([n, v]) => v === p && !used.has(n));
-		if (hit) {
-			used.add(hit[0]);
-			return `{${hit[0]}}`;
+	const tpl: string[] = [];
+	let keyGroup: string | null = null;
+
+	const walk = (i: number): boolean => {
+		if (i === parts.length) return keyGroup !== null && used.size === known.length;
+		for (const [n, v] of known) {
+			if (used.has(n)) continue;
+			const span = v.split(sep).length;
+			if (parts.slice(i, i + span).join(sep) !== v) continue;
+			used.add(n);
+			tpl.push(`{${n}}`);
+			if (walk(i + span)) return true;
+			used.delete(n);
+			tpl.pop();
 		}
-		unknown.push(p);
-		return '{key_group}';
-	});
-	if (unknown.length !== 1 || used.size !== known.length) return null;
-	// An empty key_group means we split inside a field, not between fields.
-	if (!unknown[0]) return null;
-	return { template: tpl.join(sep), key_group: unknown[0], separator: sep };
+		// An empty key_group means we split inside a field, not between fields.
+		if (keyGroup === null && parts[i]) {
+			keyGroup = parts[i];
+			tpl.push('{key_group}');
+			if (walk(i + 1)) return true;
+			keyGroup = null;
+			tpl.pop();
+		}
+		return false;
+	};
+
+	if (!walk(0)) return null;
+	return { template: tpl.join(sep), key_group: keyGroup!, separator: sep };
 }
 
 /**
